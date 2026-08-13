@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleet.local/schemas/result/v1",
+  "title": "Fleet Runner result row (schema 1)",
+  "description": "Posted to /results. kind=result rows are idempotent by (job_id, device_id, iter). kind=beacon rows are telemetry samples, also posted during host-driven jobs.",
+  "type": "object",
+  "required": ["schema", "kind", "device_id"],
+  "properties": {
+    "schema": { "const": 1 },
+    "kind": { "enum": ["result", "beacon"] },
+    "job_id": { "type": "string", "description": "required for kind=result; optional for beacon samples" },
+    "device_id": { "type": "string" },
+    "iter": { "type": "integer", "minimum": 0, "description": "iteration number; use 0 for single-shot results and the summary row" },
+    "final": { "type": "boolean", "description": "marks the job finished on this device" },
+    "ok": { "type": "boolean", "description": "with final: pass/fail verdict" },
+    "device": {
+      "type": "object",
+      "properties": {
+        "model": { "type": "string" },
+        "soc": { "type": "string" },
+        "ram_mb": { "type": "number" },
+        "os": { "type": "string" },
+        "app_ver": { "type": "string" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "benchmark metrics; memory is labeled, never laundered",
+      "properties": {
+        "load_ms": { "type": "number" },
+        "prefill_tok_s": { "type": "number" },
+        "decode_tok_s": { "type": "number" },
+        "ttft_ms": { "type": "number" },
+        "peak_mem_mb": { "type": "number" },
+        "mem_method": { "enum": ["phys_footprint", "pss"] },
+        "thermal": { "type": "array", "items": { "enum": ["nominal", "fair", "serious", "critical"] } },
+        "battery_start_pct": { "type": "number" },
+        "battery_end_pct": { "type": "number" }
+      }
+    },
+    "test": {
+      "type": "object",
+      "description": "ui-test outcomes",
+      "properties": {
+        "passed": { "type": "integer" },
+        "failed": { "type": "integer" },
+        "artifacts": { "type": "array", "items": { "type": "string" }, "description": "sha256 refs of screenshots/videos/junit uploaded to the artifact store" }
+      }
+    },
+    "beacon": {
+      "type": "object",
+      "description": "kind=beacon telemetry sample",
+      "properties": {
+        "battery_pct": { "type": "number" },
+        "charging": { "type": "boolean" },
+        "thermal": { "enum": ["nominal", "fair", "serious", "critical"] },
+        "mem_pressure": { "type": "string" },
+        "process_alive": { "type": "object", "additionalProperties": { "type": "boolean" } }
+      }
+    }
+  }
+}

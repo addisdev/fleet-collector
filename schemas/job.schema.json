@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleet.local/schemas/job/v1",
+  "title": "Fleet Runner job spec (schema 1)",
+  "type": "object",
+  "required": ["schema", "job_id", "workload", "executor"],
+  "properties": {
+    "schema": { "const": 1 },
+    "job_id": { "type": "string", "minLength": 1 },
+    "workload": {
+      "enum": ["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak"]
+    },
+    "executor": {
+      "enum": ["device", "host"],
+      "description": "device = on-device runner app claims by polling; host = Mac-side executor drives devices from outside"
+    },
+    "model": {
+      "type": "object",
+      "description": "ML workloads: the model artifact to run",
+      "required": ["name", "format", "sha256"],
+      "properties": {
+        "name": { "type": "string" },
+        "format": { "enum": ["gguf", "mlmodelc", "tflite"] },
+        "quant": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "app": {
+      "type": "object",
+      "description": "App-testing workloads: the build artifact to install/run",
+      "required": ["name", "build", "sha256"],
+      "properties": {
+        "name": { "type": "string" },
+        "build": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "backend": { "enum": ["llama.cpp", "coreml", "litert", "whisper.cpp"] },
+    "suite": {
+      "type": "object",
+      "description": "ui-test workloads",
+      "properties": {
+        "kind": { "enum": ["maestro", "xcuitest"] },
+        "flows": { "type": "string" }
+      }
+    },
+    "params": { "type": "object" },
+    "targets": {
+      "type": "object",
+      "properties": {
+        "pool": { "type": "string" },
+        "match": { "type": "string", "description": "expression matching device descriptors — not evaluated in Phase 0" },
+        "exclusive": { "type": "boolean" }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "properties": {
+        "require_charging": { "type": "boolean" },
+        "min_battery_pct": { "type": "number" }
+      }
+    },
+    "report_to": {
+      "type": "object",
+      "properties": {
+        "github_status": { "type": "string", "description": "owner/repo@sha to post a commit status to (Phase 5)" }
+      }
+    }
+  }
+}
