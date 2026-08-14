@@ -3,6 +3,79 @@ import { db } from "./db.js";
 const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
 
+const SHARED_CSS = `
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 72rem; padding: 0 1rem; color: #1c2025; background: #f7f8fa; }
+  @media (prefers-color-scheme: dark) { body { color: #e6e8ec; background: #16181c; } th { color: #767e89; } td { border-color: #31363e; } }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
+  a { color: inherit; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #7a828e; padding: 0.4rem 0.8rem 0.4rem 0; }
+  td { padding: 0.4rem 0.8rem 0.4rem 0; border-top: 1px solid #dde1e7; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 0.85em; }
+  .st-done { color: #2e7d32; } .st-failed { color: #c62828; } .st-claimed { color: #9a5b00; }
+  .lease { font-size: 0.78rem; color: #7a828e; white-space: nowrap; }
+  .note td { border-top: 0; padding-top: 0; font-size: 0.78rem; color: #7a828e; }
+`;
+
+/** One table per (model · quant · backend · pp/tg): latest final result per device. */
+export function renderBench(): string {
+  const rows = db
+    .prepare(
+      `SELECT r.job_id, r.device_id, r.payload, r.created_at, j.spec
+       FROM results r JOIN jobs j ON j.job_id = r.job_id
+       WHERE j.workload = 'benchmark' AND json_extract(r.payload, '$.final') = 1
+         AND json_extract(r.payload, '$.ok') = 1
+       ORDER BY r.created_at DESC LIMIT 500`,
+    )
+    .all() as { job_id: string; device_id: string; payload: string; created_at: string; spec: string }[];
+
+  const groups = new Map<string, Map<string, { payload: string; created_at: string }>>();
+  for (const r of rows) {
+    const spec = JSON.parse(r.spec);
+    const p = spec.params ?? {};
+    const key = `${spec.model?.name ?? "synthetic"}${spec.model?.quant ? ` ${spec.model.quant}` : ""} · ${spec.backend ?? "synthetic"} · pp${p.prompt_tokens ?? 512}/tg${p.gen_tokens ?? 128}`;
+    const perDevice = groups.get(key) ?? new Map();
+    if (!perDevice.has(r.device_id)) perDevice.set(r.device_id, r); // rows are newest-first
+    groups.set(key, perDevice);
+  }
+
+  const sections = [...groups.entries()]
+    .map(([key, perDevice]) => {
+      const body = [...perDevice.entries()]
+        .map(([device, r]) => {
+          const p = JSON.parse(r.payload);
+          const m = p.metrics ?? {};
+          const d = p.device ?? {};
+          return { device, os: d.os ?? "?", m, at: r.created_at, decode: m.decode_tok_s ?? 0 };
+        })
+        .sort((a, b) => b.decode - a.decode)
+        .map(
+          (x) => `<tr>
+            <td><code>${esc(x.device)}</code></td><td>${esc(x.os)}</td>
+            <td>${x.m.prefill_tok_s?.toFixed(1) ?? "—"}</td>
+            <td><strong>${x.m.decode_tok_s?.toFixed(1) ?? "—"}</strong></td>
+            <td>${x.m.ttft_ms?.toFixed(0) ?? "—"}</td>
+            <td>${x.m.load_ms ?? "—"}</td>
+            <td>${x.m.peak_mem_mb ?? "—"} (${esc(x.m.mem_method ?? "?")})</td>
+            <td>${esc(x.at)}</td>
+          </tr>`,
+        )
+        .join("");
+      return `<h2>${esc(key)}</h2>
+        <table><tr><th>Device</th><th>OS</th><th>Prefill tok/s</th><th>Decode tok/s</th><th>TTFT ms</th><th>Load ms</th><th>Mem MB (method)</th><th>When</th></tr>${body}</table>`;
+    })
+    .join("");
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Fleet Benchmarks</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>${SHARED_CSS}</style></head><body>
+<h1>Fleet Benchmarks <a href="/dash" style="font-size:0.8rem">← dashboard</a></h1>
+<p style="color:#7a828e;font-size:0.85rem">Latest passing run per device per configuration, fastest decode first. Memory methods differ by platform and are never comparable across them.</p>
+${sections || "<p>No benchmark results yet.</p>"}
+</body></html>`;
+}
+
 export function renderDash(): string {
   const devices = db
     .prepare("SELECT * FROM devices ORDER BY last_seen DESC")
@@ -80,19 +153,8 @@ export function renderDash(): string {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Fleet Collector</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 72rem; padding: 0 1rem; color: #1c2025; background: #f7f8fa; }
-  @media (prefers-color-scheme: dark) { body { color: #e6e8ec; background: #16181c; } th { color: #767e89; } td { border-color: #31363e; } }
-  h1 { font-size: 1.4rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
-  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
-  th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #7a828e; padding: 0.4rem 0.8rem 0.4rem 0; }
-  td { padding: 0.4rem 0.8rem 0.4rem 0; border-top: 1px solid #dde1e7; }
-  code { font-family: ui-monospace, Menlo, monospace; font-size: 0.85em; }
-  .st-done { color: #2e7d32; } .st-failed { color: #c62828; } .st-claimed { color: #9a5b00; }
-  .lease { font-size: 0.78rem; color: #7a828e; white-space: nowrap; }
-  .note td { border-top: 0; padding-top: 0; font-size: 0.78rem; color: #7a828e; }
-</style></head><body>
-<h1>Fleet Collector</h1>
+<style>${SHARED_CSS}</style></head><body>
+<h1>Fleet Collector <a href="/dash/bench" style="font-size:0.8rem">benchmarks →</a></h1>
 <h2>Devices (${devices.length})</h2>
 <table><tr><th>ID</th><th>Hardware</th><th>Pools</th><th>Battery</th><th>Thermal</th><th>Last seen</th></tr>${deviceRows}</table>
 <h2>Jobs</h2>

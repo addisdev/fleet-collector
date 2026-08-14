@@ -20,10 +20,15 @@ type Job = {
   job_id: string;
   workload: string;
   app?: { name: string; build: string; sha256: string; platform?: "android" | "ios" };
-  suite?: { kind: string; flows: string };
+  suite?: { kind: string; flows?: string; app_id?: string; asserts?: string[] };
   targets?: { pool?: string; exclusive?: boolean };
   params?: Record<string, unknown>;
 };
+
+// The generic XCUITest bundle lives in the iOS runner repo; one scheme tests
+// any app via TEST_RUNNER_-passed env (FLEET_APP_ID / FLEET_ASSERTS).
+const IOS_PROJECT = process.env.FLEET_IOS_PROJECT ??
+  path.resolve("../fleet-runner-ios/FleetRunner.xcodeproj");
 
 type Target = { id: string; platform: "android" | "ios" };
 
@@ -177,10 +182,84 @@ function parseJunit(xml: string): { passed: number; failed: number } {
   return { passed: tests - failed, failed };
 }
 
+// XCUITest path: iOS simulators only (real devices need signing + devicectl).
+// Pass/fail per device from xcodebuild's exit code; the log tail is uploaded
+// as the artifact since xcresult parsing earns its keep only with real suites.
+async function runXcuitest(job: Job) {
+  const suite = job.suite!;
+  const appId = suite.app_id;
+  if (!appId) throw new Error("xcuitest suite needs app_id");
+  const asserts = (suite.asserts ?? []).join("|");
+  const targets = (await listTargets()).filter((t) => t.platform === "ios");
+  if (targets.length === 0) throw new Error("no booted iOS simulators");
+
+  const granted = job.targets?.exclusive
+    ? await acquireLocks(job.job_id, targets.map((t) => t.id))
+    : null;
+
+  let allOk = true;
+  try {
+    for (const target of targets) {
+      if (granted && !granted.has(target.id)) {
+        await postResult({
+          job_id: job.job_id, device_id: target.id, iter: 0, ok: true,
+          error: "skipped: device locked by another job",
+        });
+        continue;
+      }
+      if (!(await hasApp(target, appId))) {
+        await postResult({
+          job_id: job.job_id, device_id: target.id, iter: 0, ok: true,
+          error: `skipped: ${appId} not installed`,
+        });
+        log(`xcuitest on ${target.id}: skipped (${appId} not installed)`);
+        continue;
+      }
+      let ok = true;
+      let logTail = "";
+      try {
+        const { stdout } = await exec(
+          "xcodebuild",
+          ["test", "-project", IOS_PROJECT, "-scheme", "FleetRunner",
+           "-destination", `platform=iOS Simulator,id=${target.id}`,
+           "-only-testing:FleetRunnerUITests"],
+          {
+            timeout: 900_000,
+            env: {
+              ...process.env,
+              TEST_RUNNER_FLEET_APP_ID: appId,
+              TEST_RUNNER_FLEET_ASSERTS: asserts,
+            },
+            maxBuffer: 64 * 1024 * 1024,
+          },
+        );
+        logTail = stdout.slice(-4000);
+      } catch (e) {
+        ok = false;
+        allOk = false;
+        logTail = ((e as { stdout?: string }).stdout ?? (e as Error).message).slice(-4000);
+      }
+      const logFile = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-xc-")), "xcodebuild.log");
+      writeFileSync(logFile, logTail);
+      const sha = await uploadArtifact(logFile, `${job.job_id}-${target.id}-xcodebuild.log`);
+      await postResult({
+        job_id: job.job_id, device_id: target.id, iter: 0, ok,
+        test: { passed: ok ? 1 : 0, failed: ok ? 0 : 1, artifacts: [sha] },
+      });
+      log(`xcuitest on ${target.id}: ${ok ? "passed" : "FAILED"}`);
+    }
+  } finally {
+    if (granted) await releaseLocks(job.job_id);
+  }
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
+}
+
 async function runUiTest(job: Job) {
   const suite = job.suite;
   if (!suite) throw new Error("ui-test job needs a suite");
+  if (suite.kind === "xcuitest") return runXcuitest(job);
   if (suite.kind !== "maestro") throw new Error(`suite kind ${suite.kind} not supported yet`);
+  if (!suite.flows) throw new Error("maestro suite needs flows");
   const flows = path.resolve(FLOWS_DIR, suite.flows);
   if (!existsSync(flows)) throw new Error(`flows not found: ${flows}`);
 
@@ -252,6 +331,108 @@ async function runUiTest(job: Job) {
   await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
 }
 
+async function postBeacon(jobId: string, deviceId: string, extra: Record<string, unknown>) {
+  await post("/results", {
+    schema: 1, kind: "beacon", job_id: jobId, device_id: deviceId, beacon: extra,
+  });
+}
+
+async function launchApp(target: Target, appId: string) {
+  if (target.platform === "android") {
+    // Resolve the real launcher activity; monkey is a fallback because some
+    // images (ATD) resolve but throttle monkey events.
+    try {
+      const { stdout } = await exec(
+        ADB, ["-s", target.id, "shell", "cmd", "package", "resolve-activity", "--brief", appId],
+        { timeout: 15_000 },
+      );
+      const component = stdout.trim().split("\n").pop()?.trim();
+      if (!component || !component.includes("/")) throw new Error(`unresolvable: ${stdout}`);
+      await exec(ADB, ["-s", target.id, "shell", "am", "start", "-n", component], { timeout: 30_000 });
+    } catch {
+      await exec(ADB, ["-s", target.id, "shell", "monkey", "-p", appId, "-c",
+        "android.intent.category.LAUNCHER", "1"], { timeout: 30_000 });
+    }
+  } else {
+    await exec("xcrun", ["simctl", "launch", target.id, appId], { timeout: 60_000 });
+  }
+}
+
+async function processAlive(target: Target, appId: string): Promise<boolean> {
+  try {
+    if (target.platform === "android") {
+      const { stdout } = await exec(ADB, ["-s", target.id, "shell", "pidof", appId], { timeout: 15_000 });
+      return stdout.trim().length > 0;
+    }
+    const { stdout } = await exec("xcrun", ["simctl", "spawn", target.id, "launchctl", "list"], { timeout: 15_000 });
+    return stdout.includes(appId);
+  } catch {
+    return false;
+  }
+}
+
+async function batteryPct(target: Target): Promise<number | null> {
+  if (target.platform !== "android") return null; // simulators have no battery
+  try {
+    const { stdout } = await exec(ADB, ["-s", target.id, "shell", "dumpsys", "battery"], { timeout: 15_000 });
+    const m = /level:\s*(\d+)/.exec(stdout);
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Soak: launch the app, then prove it stays alive — the whole measurement for
+// OEM-task-killer survival. Each sample is a beacon (renewing the job lease)
+// plus a result row; ok means the process survived every check.
+async function runSoak(job: Job) {
+  const appId = (job.params?.app_id as string) ?? undefined;
+  if (!appId) throw new Error("soak job needs params.app_id");
+  const durationS = Number(job.params?.duration_s ?? 3600);
+  const intervalS = Number(job.params?.interval_s ?? 60);
+  const platform = job.app?.platform ?? "android";
+  const targets = (await listTargets()).filter((t) => t.platform === platform);
+  if (targets.length === 0) throw new Error(`no ${platform} targets attached`);
+
+  const alive = new Map<string, boolean>();
+  for (const t of targets) {
+    await launchApp(t, appId).catch(() => {});
+    alive.set(t.id, true);
+  }
+
+  const deadline = Date.now() + durationS * 1000;
+  let iter = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, Math.min(intervalS * 1000, deadline - Date.now())));
+    iter += 1;
+    for (const t of targets) {
+      const isAlive = await processAlive(t, appId);
+      if (!isAlive) alive.set(t.id, false);
+      const battery = await batteryPct(t);
+      await postBeacon(job.job_id, t.id, {
+        process_alive: { [appId]: isAlive },
+        ...(battery !== null ? { battery_pct: battery } : {}),
+      });
+      await postResult({
+        job_id: job.job_id, device_id: t.id, iter,
+        ok: isAlive, error: isAlive ? undefined : `process ${appId} not running at check ${iter}`,
+      });
+      log(`soak ${appId} on ${t.id} check ${iter}: ${isAlive ? "alive" : "DEAD"}`);
+    }
+  }
+
+  let allOk = true;
+  for (const t of targets) {
+    const survived = alive.get(t.id) ?? false;
+    if (!survived) allOk = false;
+    await postResult({
+      job_id: job.job_id, device_id: t.id, iter: 0, ok: survived,
+      error: survived ? undefined : `${appId} died during the soak`,
+    });
+  }
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
+}
+
 async function main() {
   log(`polling ${BASE} (flows: ${FLOWS_DIR})`);
   while (true) {
@@ -271,6 +452,7 @@ async function main() {
     try {
       if (job.workload === "install") await runInstall(job);
       else if (job.workload === "ui-test") await runUiTest(job);
+      else if (job.workload === "soak") await runSoak(job);
       else {
         await postResult({
           job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,

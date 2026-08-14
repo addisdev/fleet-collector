@@ -1,10 +1,12 @@
 import Fastify from "fastify";
 import { createHash } from "node:crypto";
-import { createReadStream, statSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { writeFile, rename } from "node:fs/promises";
+import { createReadStream, createWriteStream, statSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { rename, unlink } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+import type { Readable } from "node:stream";
 import path from "node:path";
 import { db } from "./db.js";
-import { renderDash } from "./dash.js";
+import { renderDash, renderBench } from "./dash.js";
 import { cronMatches, isValidCron, minuteKey } from "./cron.js";
 
 const PORT = Number(process.env.FLEET_PORT ?? 8787);
@@ -27,13 +29,9 @@ const SWEEP_MS = Number(process.env.FLEET_SWEEP_MS ?? 15_000);
 
 const app = Fastify({ logger: { level: process.env.FLEET_LOG ?? "info" } });
 
-// Artifact uploads arrive as raw bytes. Buffered in memory for Phase 0;
-// streaming upload is a Phase 2 concern (app builds are ~100 MB, models a few GB).
-app.addContentTypeParser(
-  "application/octet-stream",
-  { parseAs: "buffer", bodyLimit: 4 * 1024 * 1024 * 1024 },
-  (_req, body, done) => done(null, body),
-);
+// Artifact uploads arrive as raw bytes and are streamed to disk while the
+// hash is computed — a multi-GB GGUF never lives in collector memory.
+app.addContentTypeParser("application/octet-stream", (_req, payload, done) => done(null, payload));
 
 type JobSpec = {
   schema: number;
@@ -493,21 +491,44 @@ app.post("/power/:pool/:state", async (req, reply) => {
 // --- artifacts (models and app builds, addressed by sha256) ---
 
 app.post("/artifacts", async (req, reply) => {
-  const body = req.body as Buffer;
-  if (!Buffer.isBuffer(body) || body.length === 0)
+  const stream = req.body as Readable;
+  if (!stream || typeof (stream as { pipe?: unknown }).pipe !== "function")
     return reply.code(400).send({ error: "raw application/octet-stream body required" });
-  const sha256 = createHash("sha256").update(body).digest("hex");
-  const dest = path.join(ARTIFACT_DIR, sha256);
-  if (!existsSync(dest)) {
-    const tmp = `${dest}.tmp-${process.pid}`;
-    await writeFile(tmp, body);
-    await rename(tmp, dest);
+
+  const tmp = path.join(ARTIFACT_DIR, `.upload-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const hash = createHash("sha256");
+  let size = 0;
+  try {
+    await pipeline(
+      stream,
+      async function* (source: AsyncIterable<Buffer>) {
+        for await (const chunk of source) {
+          hash.update(chunk);
+          size += chunk.length;
+          yield chunk;
+        }
+      },
+      createWriteStream(tmp),
+    );
+  } catch (e) {
+    await unlink(tmp).catch(() => {});
+    throw e;
   }
+  if (size === 0) {
+    await unlink(tmp).catch(() => {});
+    return reply.code(400).send({ error: "empty body" });
+  }
+
+  const sha256 = hash.digest("hex");
+  const dest = path.join(ARTIFACT_DIR, sha256);
+  if (existsSync(dest)) await unlink(tmp).catch(() => {});
+  else await rename(tmp, dest);
+
   const name = (req.headers["x-artifact-name"] as string | undefined) ?? null;
   db.prepare(
     "INSERT OR IGNORE INTO artifacts (sha256, name, size) VALUES (?, ?, ?)",
-  ).run(sha256, name, body.length);
-  return reply.code(201).send({ ok: true, sha256, size: body.length });
+  ).run(sha256, name, size);
+  return reply.code(201).send({ ok: true, sha256, size });
 });
 
 app.get("/artifacts/:sha256", async (req, reply) => {
@@ -537,6 +558,9 @@ app.get("/artifacts/:sha256", async (req, reply) => {
 
 app.get("/dash", async (_req, reply) => {
   reply.type("text/html").send(renderDash());
+});
+app.get("/dash/bench", async (_req, reply) => {
+  reply.type("text/html").send(renderBench());
 });
 app.get("/", async (_req, reply) => reply.redirect("/dash"));
 
