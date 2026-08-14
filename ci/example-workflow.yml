@@ -1,0 +1,44 @@
+# EXAMPLE ONLY — not installed anywhere. Fleet CI integration is OFF.
+#
+# When (and only when) the fleet gets connected to real CI, a workflow like
+# this goes into an app repo (e.g. greenfolio-android). Until then this file
+# documents the contract and nothing reads it.
+#
+# Requirements at connect time, none of which exist today by design:
+#   - the runner host joined to the tailnet, FLEET_COLLECTOR_URL secret set
+#   - FLEET_GITHUB_STATUS=1 + FLEET_GITHUB_TOKEN on the collector, so the
+#     final commit status comes from the collector (this step's exit code
+#     already fails the check without it)
+name: fleet-device-smoke
+on: pull_request
+
+jobs:
+  device-smoke:
+    # Runs on the self-hosted runner that can reach the collector over Tailscale.
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug
+
+      - name: Real-device smoke via fleet
+        run: |
+          cat > fleet-job.json <<EOF
+          {
+            "schema": 1,
+            "job_id": "gf-smoke-${{ github.event.pull_request.number }}-${{ github.run_attempt }}-${{ github.sha }}",
+            "workload": "ui-test",
+            "executor": "host",
+            "app": { "name": "greenfolio-android", "build": "pr-${{ github.event.pull_request.number }}", "sha256": "replaced-by-upload" },
+            "suite": { "kind": "maestro", "flows": "greenfolio/smoke.yaml" },
+            "targets": { "exclusive": true },
+            "lease": { "ttl_s": 1200 },
+            "report_to": { "github_status": "${{ github.repository }}@${{ github.sha }}" }
+          }
+          EOF
+          npx tsx scripts/ci-enqueue.ts \
+            --collector "${{ secrets.FLEET_COLLECTOR_URL }}" \
+            --job fleet-job.json \
+            --artifact app/build/outputs/apk/debug/app-debug.apk \
+            --timeout 1200

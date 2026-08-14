@@ -81,6 +81,25 @@ exists — the plist invokes it directly to avoid depending on a login `PATH`.
 child job per registered device in `targets.pool` — a whole-shelf benchmark is
 one request. Nightly runs are schedules whose template does exactly that.
 
+## CI integration — built, deliberately OFF
+
+Nothing in any app repo or CI system references the fleet today. What exists,
+dark, is the full contract:
+
+- Jobs may carry `report_to.github_status: "owner/repo@sha"`. When such a job
+  closes, the collector records a row in `status_reports` — and **only posts a
+  real GitHub commit status when armed** with `FLEET_GITHUB_STATUS=1` and
+  `FLEET_GITHUB_TOKEN`. Unarmed (the default), the row says `posted=0, dry run`;
+  `GET /status-reports` is the audit trail either way.
+- [`scripts/ci-enqueue.ts`](scripts/ci-enqueue.ts) is the CI step: uploads the
+  build artifact, enqueues the job, polls to the verdict, exits 0/1.
+- [`ci/example-workflow.yml`](ci/example-workflow.yml) documents the workflow an
+  app repo would adopt at connect time. It is installed nowhere.
+
+Turning CI on later is: arm the two env vars on the collector, add the secret +
+workflow to an app repo, and let its self-hosted runner reach the collector
+over Tailscale. Until then the fleet stays fully disconnected from real CI.
+
 Job and result shapes are documented in [`schemas/`](schemas/) (`"schema": 1`).
 
 ## Leases

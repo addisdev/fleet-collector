@@ -49,6 +49,13 @@ type JobSpec = {
 const SCHEDULER_TICK_MS = Number(process.env.FLEET_SCHEDULER_TICK_MS ?? 20_000);
 const POWER_CONFIG_PATH = process.env.FLEET_POWER_CONFIG ?? path.resolve("power.json");
 
+// CI integration is BUILT BUT OFF. Statuses are recorded (posted=0) unless
+// both are set: FLEET_GITHUB_STATUS=1 arms posting, FLEET_GITHUB_TOKEN
+// authenticates it. Nothing else in the system reads these.
+const GITHUB_STATUS_ARMED = process.env.FLEET_GITHUB_STATUS === "1";
+const GITHUB_TOKEN = process.env.FLEET_GITHUB_TOKEN;
+const GITHUB_API = process.env.FLEET_GITHUB_API ?? "https://api.github.com";
+
 const WORKLOADS = new Set(["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak"]);
 
 function touchDevice(deviceId: string) {
@@ -315,9 +322,59 @@ app.post("/results", async (req, reply) => {
       "UPDATE jobs SET status = ?, finished_at = datetime('now'), lease_deadline = NULL WHERE job_id = ?",
     ).run(b.ok === false ? "failed" : "done", b.job_id);
     db.prepare("DELETE FROM device_locks WHERE job_id = ?").run(b.job_id);
+    reportStatus(b.job_id, b.ok === false ? "failure" : "success").catch((e) =>
+      app.log.error(e, "status report failed"),
+    );
   }
   return { ok: true };
 });
+
+// --- GitHub commit statuses (recorded always, posted only when armed) ---
+
+async function reportStatus(jobId: string, state: "success" | "failure") {
+  const row = db.prepare("SELECT spec FROM jobs WHERE job_id = ?").get(jobId) as
+    | { spec: string }
+    | undefined;
+  if (!row) return;
+  const target = (JSON.parse(row.spec) as JobSpec & { report_to?: { github_status?: string } })
+    .report_to?.github_status;
+  if (!target) return;
+
+  let posted = 0;
+  let detail: string;
+  if (!GITHUB_STATUS_ARMED || !GITHUB_TOKEN) {
+    detail = "dry run: FLEET_GITHUB_STATUS/FLEET_GITHUB_TOKEN not set";
+    app.log.info({ job_id: jobId, target, state }, "commit status recorded, not posted (CI off)");
+  } else {
+    const m = /^([^/]+)\/([^@]+)@(.+)$/.exec(target);
+    if (!m) {
+      detail = `bad github_status target: ${target}`;
+    } else {
+      const res = await fetch(`${GITHUB_API}/repos/${m[1]}/${m[2]}/statuses/${m[3]}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${GITHUB_TOKEN}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          state,
+          context: "fleet-runner",
+          description: `fleet job ${jobId}: ${state}`,
+        }),
+      });
+      posted = res.ok ? 1 : 0;
+      detail = `github responded ${res.status}`;
+    }
+  }
+  db.prepare(
+    `INSERT INTO status_reports (job_id, target, state, posted, detail) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(job_id, target) DO UPDATE SET state = excluded.state, posted = excluded.posted, detail = excluded.detail`,
+  ).run(jobId, target, state, posted, detail);
+}
+
+app.get("/status-reports", async () =>
+  db.prepare("SELECT * FROM status_reports ORDER BY created_at DESC LIMIT 100").all());
 
 // --- device locks (host executor coordination) ---
 

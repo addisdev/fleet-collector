@@ -78,6 +78,20 @@ CREATE TABLE IF NOT EXISTS device_locks (
   job_id      TEXT NOT NULL,
   acquired_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Every job that asked for a GitHub commit status gets a row here when it
+-- closes. posted=0 rows are dry runs: reporting is off (the default) or the
+-- POST failed — the audit trail exists either way, so turning CI on later
+-- changes behavior, not bookkeeping.
+CREATE TABLE IF NOT EXISTS status_reports (
+  job_id     TEXT NOT NULL,
+  target     TEXT NOT NULL,            -- owner/repo@sha
+  state      TEXT NOT NULL,            -- success | failure
+  posted     INTEGER NOT NULL DEFAULT 0,
+  detail     TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (job_id, target)
+);
 `);
 
 // CREATE TABLE IF NOT EXISTS is a no-op on a database that predates a column,

@@ -318,7 +318,10 @@ console.log(`smoke against ${BASE}`);
   check("invalid cron rejected", bad.status === 400);
   const r = await json("POST", "/schedules", {
     id: SCHED, cron: "* * * * *", enabled: true,
-    template: { schema: 1, workload: "benchmark", executor: "device", backend: "synthetic" },
+    // Pinned to a device that never exists so the fired job stays queued and
+    // later sections' claim order is undisturbed.
+    template: { schema: 1, workload: "benchmark", executor: "device", backend: "synthetic",
+                targets: { device_id: "smoke-nonexistent-device" } },
   });
   check("schedule created", r.status === 201, JSON.stringify(r.body));
   const tick = await json("POST", "/schedules/tick");
@@ -332,6 +335,26 @@ console.log(`smoke against ${BASE}`);
   );
   const off = await json("PATCH", `/schedules/${SCHED}`, { enabled: false });
   check("schedule disables", off.status === 200 && off.body?.enabled === false);
+}
+
+// 15. CI statuses are recorded but never posted while the integration is off
+{
+  const CI_JOB = `smoke-ci-${run}`;
+  await json("POST", "/jobs", {
+    schema: 1, job_id: CI_JOB, workload: "benchmark", executor: "device",
+    backend: "synthetic", targets: { device_id: DEVICE },
+    report_to: { github_status: "addisdev/example@deadbeef" },
+  });
+  const claimed = await json("GET", `/devices/${DEVICE}/next-job`);
+  check("ci job claimed", claimed.status === 200 && claimed.body?.job_id === CI_JOB);
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: CI_JOB, device_id: DEVICE, iter: 0, final: true, ok: false,
+  });
+  const reports = await json("GET", "/status-reports");
+  const row = ((reports.body ?? []) as { job_id: string; state: string; posted: number; detail: string }[])
+    .find((r) => r.job_id === CI_JOB);
+  check("status recorded as failure", row?.state === "failure", JSON.stringify(row));
+  check("status NOT posted (CI off)", row?.posted === 0 && (row?.detail ?? "").includes("dry run"), JSON.stringify(row));
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
