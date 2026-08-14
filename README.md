@@ -10,9 +10,15 @@ Tailscale mesh. Runs under `launchd` on the Mac mini.
 
 ```
 npm install
-npm start          # listens on :8787 (FLEET_PORT to change)
+npm start          # collector on :8787 (FLEET_PORT to change)
+npm run executor   # host executor: claims host jobs, drives devices via adb + Maestro
 npm run smoke      # end-to-end check against a running collector
 ```
+
+The host executor (Phase 2) handles `install` (artifact → `adb install` on every
+attached device) and `ui-test` (`maestro test` per device, JUnit report parsed
+and uploaded back as an artifact). Flows resolve relative to `flows/`
+(`FLEET_FLOWS_DIR` to change); iOS via devicectl/XCUITest is Phase 3.
 
 ## Endpoints
 

@@ -1,0 +1,11 @@
+# GreenFolio smoke: app launches and renders a known screen.
+# Deliberately does NOT clearState — the emulator's logged-in session is the
+# fixture until the login flow is covered. Richer flows belong app-side
+# (greenfolio-android) once suites are versioned with the app; this flow
+# proves the ui-test rail.
+appId: com.taylab.greenfolio.debug
+---
+- launchApp
+- extendedWaitUntil:
+    visible: "Plants|Blooms|Account|Pot labels|GreenFolio"
+    timeout: 15000

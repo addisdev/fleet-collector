@@ -1,0 +1,10 @@
+# Fleet Runner dogfood smoke: the runner app launches and renders its
+# status screen. Runs on any device the install workload has reached.
+appId: com.taylab.fleetrunner
+---
+- launchApp
+- extendedWaitUntil:
+    visible: "Fleet Runner"
+    timeout: 15000
+- assertVisible: "Start agent"
+- assertVisible: "Collector URL"
