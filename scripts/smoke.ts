@@ -23,10 +23,14 @@ async function json(method: string, url: string, body?: unknown) {
   return { status: res.status, body: res.status === 204 ? null : await res.json().catch(() => null) };
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 const run = Date.now();
 const DEVICE = `smoke-pixel-${run}`;
 const BENCH_JOB = `smoke-bench-${run}`;
 const UI_JOB = `smoke-uitest-${run}`;
+const LEASE_JOB = `smoke-lease-${run}`;
+const DRAIN_JOB = `smoke-drain-${run}`;
 
 console.log(`smoke against ${BASE}`);
 
@@ -138,13 +142,111 @@ console.log(`smoke against ${BASE}`);
   check("failing run marks job failed", job.body?.status === "failed", `status=${job.body?.status}`);
 }
 
-// 9. dashboard shows all of it
+// 9. a claim that goes quiet expires, requeues, and eventually fails.
+// Models the real incident: an emulator's low-memory killer takes out the
+// runner mid-benchmark, so no final result and no further beacons ever arrive.
+{
+  const r = await json("POST", "/jobs", {
+    schema: 1, job_id: LEASE_JOB, workload: "benchmark", executor: "device",
+    model: { name: "smoke-model", format: "gguf", quant: "Q4_K_M", sha256: "0".repeat(64) },
+    targets: { pool: "ml-capable" },
+    lease: { ttl_s: 2, max_attempts: 2 },
+  });
+  check("short-lease job enqueues", r.status === 201, JSON.stringify(r));
+
+  const claim = await json("GET", `/devices/${DEVICE}/next-job`);
+  check("device claims short-lease job", claim.body?.job_id === LEASE_JOB, JSON.stringify(claim.body));
+  check("claimed spec carries effective lease", claim.body?.lease?.ttl_s === 2 && claim.body?.lease?.max_attempts === 2);
+
+  const claimed = await json("GET", `/jobs/${LEASE_JOB}`);
+  check(
+    "claim records attempt + lease deadline",
+    claimed.body?.status === "claimed" && claimed.body?.attempts === 1 && !!claimed.body?.lease_deadline,
+    JSON.stringify(claimed.body),
+  );
+
+  // A live runner beacons; that must hold the lease open past its original deadline.
+  await sleep(1500);
+  const beacon = await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: DEVICE, job_id: LEASE_JOB,
+    beacon: { battery_pct: 66, charging: true, thermal: "fair" },
+  });
+  check("beacon reports lease renewed", beacon.body?.lease_renewed === true, JSON.stringify(beacon.body));
+  await sleep(1000);
+  const held = await json("POST", "/jobs/sweep");
+  check("renewed lease survives the sweep", !held.body?.requeued?.includes(LEASE_JOB), JSON.stringify(held.body));
+  check("job still claimed after renewal", (await json("GET", `/jobs/${LEASE_JOB}`)).body?.status === "claimed");
+
+  // Now the runner dies: beacons stop, the lease lapses, the sweep requeues it.
+  await sleep(2500);
+  const swept = await json("POST", "/jobs/sweep");
+  check("sweep requeues the expired claim", swept.body?.requeued?.includes(LEASE_JOB), JSON.stringify(swept.body));
+  const requeued = await json("GET", `/jobs/${LEASE_JOB}`);
+  check(
+    "requeued job is claimable again, claimant cleared",
+    requeued.body?.status === "queued" && requeued.body?.claimed_by === null && requeued.body?.lease_deadline === null,
+    JSON.stringify(requeued.body),
+  );
+  check("requeue records why", /lease expired/.test(requeued.body?.last_error ?? ""), requeued.body?.last_error);
+
+  // A beacon for a job nobody holds tells the runner to give up.
+  const orphan = await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: DEVICE, job_id: LEASE_JOB,
+    beacon: { battery_pct: 65, charging: true, thermal: "fair" },
+  });
+  check("beacon on an unclaimed job reports no renewal", orphan.body?.lease_renewed === false, JSON.stringify(orphan.body));
+
+  // Second (and last) attempt: another device picks it up and dies the same way.
+  const reclaim = await json("GET", `/devices/${DEVICE}/next-job`);
+  check("requeued job is handed out again", reclaim.body?.job_id === LEASE_JOB, JSON.stringify(reclaim.body));
+  check("retry counts as a second attempt", (await json("GET", `/jobs/${LEASE_JOB}`)).body?.attempts === 2);
+
+  await sleep(2500);
+  const final = await json("POST", "/jobs/sweep");
+  check("sweep fails the job once attempts run out", final.body?.failed?.includes(LEASE_JOB), JSON.stringify(final.body));
+  const dead = await json("GET", `/jobs/${LEASE_JOB}`);
+  check(
+    "exhausted job ends failed, not requeued",
+    dead.body?.status === "failed" && dead.body?.attempts === 2 && !!dead.body?.finished_at,
+    JSON.stringify(dead.body),
+  );
+}
+
+// 10. lease defaults: long-running workloads get hours, bad TTLs are rejected.
+// Pool nobody is in, so this queued job never interferes with later runs.
+{
+  const r = await json("POST", "/jobs", {
+    schema: 1, job_id: DRAIN_JOB, workload: "drain", executor: "device",
+    targets: { pool: `smoke-unclaimable-${run}` },
+  });
+  check("drain job enqueues without an explicit lease", r.status === 201, JSON.stringify(r));
+  const job = await json("GET", `/jobs/${DRAIN_JOB}`);
+  check(
+    "drain defaults to a multi-hour lease",
+    job.body?.lease_ttl_s === 14400 && job.body?.max_attempts === 3,
+    JSON.stringify(job.body),
+  );
+
+  const bad = await json("POST", "/jobs", {
+    schema: 1, job_id: `${DRAIN_JOB}-bad`, workload: "benchmark", executor: "device",
+    lease: { ttl_s: 0 },
+  });
+  check("zero-second lease rejected", bad.status === 400, JSON.stringify(bad));
+  const tooLong = await json("POST", "/jobs", {
+    schema: 1, job_id: `${DRAIN_JOB}-toolong`, workload: "soak", executor: "device",
+    lease: { ttl_s: 999999 },
+  });
+  check("absurd lease rejected", tooLong.status === 400, JSON.stringify(tooLong));
+}
+
+// 11. dashboard shows all of it
 {
   const html = await (await fetch(`${BASE}/dash`)).text();
   check("dashboard lists device", html.includes(DEVICE));
   check("dashboard lists both jobs", html.includes(BENCH_JOB) && html.includes(UI_JOB));
   check("dashboard shows benchmark summary", html.includes("tok/s"));
   check("dashboard shows ui-test verdict", html.includes("11 passed / 1 failed"));
+  check("dashboard explains the lease failure", html.includes(LEASE_JOB) && html.includes("gave up after 2/2 attempts"));
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

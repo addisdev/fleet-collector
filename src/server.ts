@@ -13,6 +13,17 @@ mkdirSync(ARTIFACT_DIR, { recursive: true });
 const LONG_POLL_S = 25;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Lease defaults. A claim expires unless the runner keeps renewing it via
+// beacons; the sweep then requeues the job (up to max_attempts) so a dead
+// runner cannot strand work in 'claimed'.
+const DEFAULT_LEASE_TTL_S = 600;
+// drain and soak legitimately run for hours between beacons.
+const LONG_LEASE_TTL_S = 4 * 60 * 60;
+const LONG_LEASE_WORKLOADS = new Set(["drain", "soak"]);
+const MAX_LEASE_TTL_S = 24 * 60 * 60;
+const DEFAULT_MAX_ATTEMPTS = 3;
+const SWEEP_MS = Number(process.env.FLEET_SWEEP_MS ?? 15_000);
+
 const app = Fastify({ logger: { level: process.env.FLEET_LOG ?? "info" } });
 
 // Artifact uploads arrive as raw bytes. Buffered in memory for Phase 0;
@@ -29,6 +40,7 @@ type JobSpec = {
   workload: string;
   executor: "device" | "host";
   targets?: { pool?: string; match?: string; exclusive?: boolean };
+  lease?: { ttl_s?: number; max_attempts?: number };
   [k: string]: unknown;
 };
 
@@ -38,7 +50,8 @@ function touchDevice(deviceId: string) {
   db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE device_id = ?").run(deviceId);
 }
 
-// Atomically claim the oldest queued job this claimant is eligible for.
+// Atomically claim the oldest queued job this claimant is eligible for, and
+// start its lease clock.
 const claimTx = db.transaction((executor: string, claimant: string, devicePools: string[]): JobSpec | null => {
   const rows = db
     .prepare("SELECT job_id, spec FROM jobs WHERE status = 'queued' AND executor = ? ORDER BY created_at")
@@ -48,7 +61,10 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
     const pool = spec.targets?.pool;
     if (executor === "device" && pool && !devicePools.includes(pool)) continue;
     db.prepare(
-      "UPDATE jobs SET status = 'claimed', claimed_by = ?, claimed_at = datetime('now') WHERE job_id = ?",
+      `UPDATE jobs SET status = 'claimed', claimed_by = ?, claimed_at = datetime('now'),
+                       attempts = attempts + 1,
+                       lease_deadline = datetime('now', '+' || lease_ttl_s || ' seconds')
+       WHERE job_id = ?`,
     ).run(claimant, row.job_id);
     return spec;
   }
@@ -62,6 +78,54 @@ async function longPollClaim(executor: "device" | "host", claimant: string, pool
     await sleep(1000);
   }
   return null;
+}
+
+// --- lease sweep ---
+
+type SweptJob = { job_id: string; claimed_by: string | null; attempts: number };
+
+// Requeue claims whose lease lapsed; give up on jobs that burned all attempts.
+const sweepLeasesTx = db.transaction((): { requeued: SweptJob[]; failed: SweptJob[] } => {
+  const expired = db
+    .prepare(
+      `SELECT job_id, claimed_by, attempts, max_attempts FROM jobs
+       WHERE status = 'claimed' AND lease_deadline IS NOT NULL AND lease_deadline <= datetime('now')`,
+    )
+    .all() as (SweptJob & { max_attempts: number })[];
+
+  const requeue = db.prepare(
+    `UPDATE jobs SET status = 'queued', claimed_by = NULL, claimed_at = NULL,
+                     lease_deadline = NULL, last_error = ?
+     WHERE job_id = ?`,
+  );
+  const giveUp = db.prepare(
+    `UPDATE jobs SET status = 'failed', finished_at = datetime('now'),
+                     lease_deadline = NULL, last_error = ?
+     WHERE job_id = ?`,
+  );
+
+  const requeued: SweptJob[] = [];
+  const failed: SweptJob[] = [];
+  for (const job of expired) {
+    const who = job.claimed_by ?? "unknown claimant";
+    if (job.attempts >= job.max_attempts) {
+      giveUp.run(`lease expired on ${who}; gave up after ${job.attempts}/${job.max_attempts} attempts`, job.job_id);
+      failed.push(job);
+    } else {
+      requeue.run(`lease expired on ${who}; requeued after attempt ${job.attempts}/${job.max_attempts}`, job.job_id);
+      requeued.push(job);
+    }
+  }
+  return { requeued, failed };
+});
+
+function sweepLeases() {
+  const swept = sweepLeasesTx();
+  for (const j of swept.requeued)
+    app.log.warn({ job_id: j.job_id, claimed_by: j.claimed_by, attempt: j.attempts }, "lease expired; requeued");
+  for (const j of swept.failed)
+    app.log.error({ job_id: j.job_id, claimed_by: j.claimed_by, attempts: j.attempts }, "lease expired; job failed");
+  return swept;
 }
 
 // --- devices ---
@@ -106,16 +170,42 @@ app.post("/jobs", async (req, reply) => {
   if (!WORKLOADS.has(spec.workload)) return reply.code(400).send({ error: `unknown workload: ${spec.workload}` });
   if (spec.executor !== "device" && spec.executor !== "host")
     return reply.code(400).send({ error: "executor must be 'device' or 'host'" });
+
+  if (spec.lease !== undefined && (typeof spec.lease !== "object" || spec.lease === null || Array.isArray(spec.lease)))
+    return reply.code(400).send({ error: "lease must be an object" });
+  const ttlS =
+    spec.lease?.ttl_s ??
+    (LONG_LEASE_WORKLOADS.has(spec.workload) ? LONG_LEASE_TTL_S : DEFAULT_LEASE_TTL_S);
+  if (!Number.isInteger(ttlS) || ttlS < 1 || ttlS > MAX_LEASE_TTL_S)
+    return reply.code(400).send({ error: `lease.ttl_s must be an integer between 1 and ${MAX_LEASE_TTL_S}` });
+  const maxAttempts = spec.lease?.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1)
+    return reply.code(400).send({ error: "lease.max_attempts must be an integer >= 1" });
+  // Persist the effective lease so runners see it in the spec they claim and
+  // can pace their beacons against it.
+  spec.lease = { ttl_s: ttlS, max_attempts: maxAttempts };
+
   try {
-    db.prepare("INSERT INTO jobs (job_id, executor, workload, spec) VALUES (?, ?, ?, ?)").run(
-      spec.job_id, spec.executor, spec.workload, JSON.stringify(spec),
-    );
+    db.prepare(
+      "INSERT INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(spec.job_id, spec.executor, spec.workload, JSON.stringify(spec), ttlS, maxAttempts);
   } catch (e: unknown) {
     if ((e as { code?: string }).code === "SQLITE_CONSTRAINT_PRIMARYKEY")
       return reply.code(409).send({ error: "job_id already exists" });
     throw e;
   }
   return reply.code(201).send({ ok: true, job_id: spec.job_id });
+});
+
+// Runs on a timer too; exposed so an operator (or the smoke test) can force a
+// pass instead of waiting out the interval.
+app.post("/jobs/sweep", async () => {
+  const swept = sweepLeases();
+  return {
+    ok: true,
+    requeued: swept.requeued.map((j) => j.job_id),
+    failed: swept.failed.map((j) => j.job_id),
+  };
 });
 
 app.get("/jobs/:id", async (req, reply) => {
@@ -142,7 +232,22 @@ app.post("/results", async (req, reply) => {
     db.prepare("UPDATE devices SET last_beacon = ?, last_seen = datetime('now') WHERE device_id = ?").run(
       JSON.stringify(b), b.device_id,
     );
-    return { ok: true };
+    // A beacon carrying a job_id is proof of life for that claim, so it pushes
+    // the lease out. Not scoped to claimed_by: host-executor jobs are claimed by
+    // the Mac executor but beacon from the device it is driving. lease_renewed
+    // false tells a runner its claim is gone (swept, or already finished) and it
+    // should stop work rather than keep burning the device.
+    let leaseRenewed = false;
+    if (b.job_id) {
+      leaseRenewed =
+        db
+          .prepare(
+            `UPDATE jobs SET lease_deadline = datetime('now', '+' || lease_ttl_s || ' seconds')
+             WHERE job_id = ? AND status = 'claimed'`,
+          )
+          .run(b.job_id).changes > 0;
+    }
+    return { ok: true, lease_renewed: leaseRenewed };
   }
 
   if (b.kind !== "result") return reply.code(400).send({ error: "kind must be 'result' or 'beacon'" });
@@ -154,8 +259,9 @@ app.post("/results", async (req, reply) => {
   touchDevice(b.device_id);
 
   if (b.final) {
+    // Dropping the deadline takes the job out of the sweep's reach for good.
     db.prepare(
-      "UPDATE jobs SET status = ?, finished_at = datetime('now') WHERE job_id = ?",
+      "UPDATE jobs SET status = ?, finished_at = datetime('now'), lease_deadline = NULL WHERE job_id = ?",
     ).run(b.ok === false ? "failed" : "done", b.job_id);
   }
   return { ok: true };
@@ -213,4 +319,6 @@ app.get("/", async (_req, reply) => reply.redirect("/dash"));
 
 app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
   app.log.info(`fleet-collector listening on :${PORT}`);
+  sweepLeases(); // catch claims that lapsed while the collector was down
+  setInterval(sweepLeases, SWEEP_MS).unref();
 });
