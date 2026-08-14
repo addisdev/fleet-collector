@@ -27,12 +27,13 @@
     },
     "app": {
       "type": "object",
-      "description": "App-testing workloads: the build artifact to install/run",
+      "description": "App-testing workloads: the build artifact to install/run. Android artifacts are raw APKs; iOS artifacts are zips of the .app bundle.",
       "required": ["name", "build", "sha256"],
       "properties": {
         "name": { "type": "string" },
         "build": { "type": "string" },
-        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "platform": { "enum": ["android", "ios"], "default": "android" }
       }
     },
     "backend": { "enum": ["llama.cpp", "coreml", "litert", "whisper.cpp"] },

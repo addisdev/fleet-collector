@@ -3,6 +3,14 @@
 appId: com.taylab.fleetrunner
 ---
 - launchApp
+# First launch after a fresh install shows the notification permission
+# dialog on full Android images (ATD auto-grants; iOS asks only after the
+# runner requests). Dismiss it if present so the assertion sees the app.
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
 - extendedWaitUntil:
     visible: "Fleet Runner"
     timeout: 15000
