@@ -27,7 +27,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   claimed_by  TEXT,
   claimed_at  TEXT,
-  finished_at TEXT
+  finished_at TEXT,
+  -- Lease: a claim is only good until lease_deadline. Beacons renew it, the
+  -- sweep requeues it when it lapses, so a runner that dies mid-job (OOM kill,
+  -- flat battery, yanked cable) does not strand the job in 'claimed' forever.
+  lease_ttl_s    INTEGER NOT NULL DEFAULT 600,
+  max_attempts   INTEGER NOT NULL DEFAULT 3,
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  lease_deadline TEXT,
+  last_error     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -54,3 +62,30 @@ CREATE TABLE IF NOT EXISTS artifacts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `);
+
+// CREATE TABLE IF NOT EXISTS is a no-op on a database that predates a column,
+// so added columns need an explicit ALTER for existing collector installs.
+const jobColumns = new Set(
+  (db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map((c) => c.name),
+);
+for (const [column, ddl] of [
+  ["lease_ttl_s", "lease_ttl_s INTEGER NOT NULL DEFAULT 600"],
+  ["max_attempts", "max_attempts INTEGER NOT NULL DEFAULT 3"],
+  ["attempts", "attempts INTEGER NOT NULL DEFAULT 0"],
+  ["lease_deadline", "lease_deadline TEXT"],
+  ["last_error", "last_error TEXT"],
+] as const) {
+  if (!jobColumns.has(column)) db.exec(`ALTER TABLE jobs ADD COLUMN ${ddl}`);
+}
+
+// After the ALTERs: on a pre-lease database the column does not exist yet when
+// the CREATE TABLE block above runs.
+db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs (status, lease_deadline);");
+
+// Jobs claimed before leases existed have no deadline and would never be swept.
+// Treat them as claimed right now: they get one lease window to report in.
+db.prepare(
+  `UPDATE jobs SET lease_deadline = datetime('now', '+' || lease_ttl_s || ' seconds'),
+                   attempts = MAX(attempts, 1)
+   WHERE status = 'claimed' AND lease_deadline IS NULL`,
+).run();

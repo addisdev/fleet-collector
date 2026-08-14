@@ -9,7 +9,7 @@ export function renderDash(): string {
     .all() as { device_id: string; descriptor: string; pools: string; last_seen: string; last_beacon: string | null }[];
   const jobs = db
     .prepare("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 50")
-    .all() as { job_id: string; executor: string; workload: string; status: string; created_at: string; claimed_by: string | null; finished_at: string | null }[];
+    .all() as { job_id: string; executor: string; workload: string; status: string; created_at: string; claimed_by: string | null; finished_at: string | null; attempts: number; max_attempts: number; lease_deadline: string | null; last_error: string | null }[];
   const results = db
     .prepare("SELECT * FROM results ORDER BY created_at DESC LIMIT 50")
     .all() as { job_id: string; device_id: string; iter: number; payload: string; created_at: string }[];
@@ -30,16 +30,27 @@ export function renderDash(): string {
     .join("");
 
   const jobRows = jobs
-    .map(
-      (j) => `<tr>
+    .map((j) => {
+      const lease =
+        j.status === "claimed" && j.lease_deadline
+          ? `try ${j.attempts}/${j.max_attempts} · lease to ${esc(j.lease_deadline)}`
+          : j.attempts > 1 || j.last_error
+            ? `try ${j.attempts}/${j.max_attempts}`
+            : "—";
+      return `<tr>
         <td><code>${esc(j.job_id)}</code></td>
         <td>${esc(j.workload)}</td>
         <td>${esc(j.executor)}</td>
         <td class="st-${esc(j.status)}">${esc(j.status)}</td>
         <td>${esc(j.claimed_by ?? "—")}</td>
+        <td class="lease">${lease}</td>
         <td>${esc(j.finished_at ?? j.created_at)}</td>
-      </tr>`,
-    )
+      </tr>${
+        j.last_error
+          ? `<tr class="note"><td colspan="7">↳ ${esc(j.last_error)}</td></tr>`
+          : ""
+      }`;
+    })
     .join("");
 
   const resultRows = results
@@ -72,12 +83,14 @@ export function renderDash(): string {
   td { padding: 0.4rem 0.8rem 0.4rem 0; border-top: 1px solid #dde1e7; }
   code { font-family: ui-monospace, Menlo, monospace; font-size: 0.85em; }
   .st-done { color: #2e7d32; } .st-failed { color: #c62828; } .st-claimed { color: #9a5b00; }
+  .lease { font-size: 0.78rem; color: #7a828e; white-space: nowrap; }
+  .note td { border-top: 0; padding-top: 0; font-size: 0.78rem; color: #7a828e; }
 </style></head><body>
 <h1>Fleet Collector</h1>
 <h2>Devices (${devices.length})</h2>
 <table><tr><th>ID</th><th>Hardware</th><th>Pools</th><th>Battery</th><th>Thermal</th><th>Last seen</th></tr>${deviceRows}</table>
 <h2>Jobs</h2>
-<table><tr><th>Job</th><th>Workload</th><th>Executor</th><th>Status</th><th>Claimed by</th><th>Updated</th></tr>${jobRows}</table>
+<table><tr><th>Job</th><th>Workload</th><th>Executor</th><th>Status</th><th>Claimed by</th><th>Lease</th><th>Updated</th></tr>${jobRows}</table>
 <h2>Recent results</h2>
 <table><tr><th>Job</th><th>Device</th><th>Iter</th><th>Summary</th><th>At</th></tr>${resultRows}</table>
 </body></html>`;

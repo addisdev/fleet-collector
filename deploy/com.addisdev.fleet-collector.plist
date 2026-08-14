@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.addisdev.fleet-collector</string>
+
+  <!-- Invoked the same way `npm start` invokes it, minus npm: tsx's CLI, run by
+       an absolute node. A LaunchAgent inherits no login PATH, so nothing here
+       may rely on a shell resolving a command name. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/node_modules/tsx/dist/cli.mjs</string>
+    <string>src/server.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector</string>
+
+  <!-- The whole point: the fleet's devices long-poll this service, so a crash
+       that leaves it down strands every runner until someone notices. Plain
+       KeepAlive (not SuccessfulExit) means launchd revives it however it died.
+       To stop it deliberately, `launchctl bootout` the job — do not kill it,
+       launchd will just start it again. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Ten seconds between respawns. If the collector is crash-looping (port
+       already taken by a stray `npm start`, corrupt DB), this keeps it from
+       spinning, and the gaps show up plainly in the log. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- Absolute, not left to WorkingDirectory: the server falls back to
+       path.resolve("data"), so a wrong cwd would silently create a second,
+       empty fleet.db and the fleet's whole history would look erased. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>FLEET_DATA_DIR</key>
+    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/data</string>
+    <key>FLEET_ARTIFACT_DIR</key>
+    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/artifacts/store</string>
+  </dict>
+
+  <!-- launchd does not rotate these; the collector logs a line per request, so
+       check the size occasionally. -->
+  <key>StandardOutPath</key>
+  <string>/Users/addisdev/Library/Logs/fleet-collector.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/addisdev/Library/Logs/fleet-collector.log</string>
+</dict>
+</plist>
