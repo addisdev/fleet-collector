@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS device_locks (
   acquired_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Pipeline event rails: publish/subscribe without an external broker. Old
+-- devices publish trigger events; capable devices subscribe, process, and
+-- publish results to a sibling topic.
+CREATE TABLE IF NOT EXISTS events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic      TEXT NOT NULL,
+  payload    TEXT NOT NULL,           -- JSON
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events (topic, id);
+
 -- Every job that asked for a GitHub commit status gets a row here when it
 -- closes. posted=0 rows are dry runs: reporting is off (the default) or the
 -- POST failed — the audit trail exists either way, so turning CI on later

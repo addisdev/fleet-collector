@@ -38,6 +38,11 @@
         "battery_end_pct": { "type": "number" }
       }
     },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "sha256 refs of output artifacts the runner uploaded (batch outputs, reports)"
+    },
     "test": {
       "type": "object",
       "description": "ui-test outcomes",

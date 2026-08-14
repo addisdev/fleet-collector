@@ -75,7 +75,19 @@ exists — the plist invokes it directly to avoid depending on a login `PATH`.
 | `POST /schedules/tick` | Force a scheduler evaluation now (fires due schedules at most once per minute) |
 | `POST /locks/acquire` / `POST /locks/release` | Host-executor device locks for `targets.exclusive` jobs; device-executor claims lock implicitly |
 | `POST /power/:pool/:state` | Fire the pool's smart-plug webhook (`on`/`off`) from `power.json` — see `power.example.json` |
-| `GET /dash` | Server-rendered dashboard |
+| `POST /events/:topic` | Publish a pipeline event (JSON payload); returns its id |
+| `GET /events/:topic/poll?after=<id>` | Long-poll the next event past the cursor; 204 on expiry |
+| `GET /dash` / `GET /dash/bench` | Dashboard / cross-device benchmark comparison |
+
+Batch jobs (`workload: batch`) take `params.input_sha256` (an artifact of
+`{"items": [...]}`), process each item on the device (llama.cpp generates,
+synthetic digests), and upload the outputs as a new artifact referenced from
+the final result. Pipeline jobs (`workload: pipeline`) subscribe to
+`params.topic`, process each event's `prompt`, and publish to `<topic>.out` —
+the tiered-pipeline pattern with the collector as the broker. Runners enforce
+`constraints.require_charging` / `min_battery_pct` before running: an
+on-battery Samsung was observed to throttle decode ~100x with the screen off,
+which is exactly the lie those constraints exist to prevent.
 
 `POST /jobs` with `"fanout": true` (device-executor only) enqueues one pinned
 child job per registered device in `targets.pool` — a whole-shelf benchmark is

@@ -357,5 +357,17 @@ console.log(`smoke against ${BASE}`);
   check("status NOT posted (CI off)", row?.posted === 0 && (row?.detail ?? "").includes("dry run"), JSON.stringify(row));
 }
 
+// 16. pipeline event rails: publish/poll with a cursor
+{
+  const TOPIC = `smoke-topic-${run}`;
+  const e1 = await json("POST", `/events/${TOPIC}`, { prompt: "first" });
+  const e2 = await json("POST", `/events/${TOPIC}`, { prompt: "second" });
+  check("events publish", e1.status === 201 && e2.status === 201 && e2.body.id > e1.body.id);
+  const p1 = await json("GET", `/events/${TOPIC}/poll?after=0`);
+  check("poll returns first event", p1.status === 200 && p1.body?.payload?.prompt === "first");
+  const p2 = await json("GET", `/events/${TOPIC}/poll?after=${p1.body.id}`);
+  check("cursor advances to second event", p2.status === 200 && p2.body?.payload?.prompt === "second");
+}
+
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

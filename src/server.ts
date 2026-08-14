@@ -407,6 +407,31 @@ app.post("/locks/release", async (req, reply) => {
   return { ok: true, released };
 });
 
+// --- pipeline events (pub/sub without an external broker) ---
+
+app.post("/events/:topic", async (req, reply) => {
+  const { topic } = req.params as { topic: string };
+  const payload = req.body ?? {};
+  const r = db.prepare("INSERT INTO events (topic, payload) VALUES (?, ?)").run(
+    topic, JSON.stringify(payload),
+  );
+  return reply.code(201).send({ ok: true, id: Number(r.lastInsertRowid) });
+});
+
+// Long-poll the next event after a cursor; 204 when the poll expires empty.
+app.get("/events/:topic/poll", async (req, reply) => {
+  const { topic } = req.params as { topic: string };
+  const after = Number((req.query as Record<string, string>).after ?? 0);
+  for (let i = 0; i < LONG_POLL_S; i++) {
+    const row = db
+      .prepare("SELECT id, payload, created_at FROM events WHERE topic = ? AND id > ? ORDER BY id LIMIT 1")
+      .get(topic, after) as { id: number; payload: string; created_at: string } | undefined;
+    if (row) return { id: row.id, payload: JSON.parse(row.payload), created_at: row.created_at };
+    await sleep(1000);
+  }
+  return reply.code(204).send();
+});
+
 // --- schedules (nightly runs are just cron-driven enqueues) ---
 
 type ScheduleRow = { id: string; cron: string; template: string; enabled: number; last_run: string | null };
