@@ -14,6 +14,43 @@ npm start          # listens on :8787 (FLEET_PORT to change)
 npm run smoke      # end-to-end check against a running collector
 ```
 
+Smoke against a collector you started for the purpose, never the live one — it
+enqueues jobs a real device could claim. Give it its own port and data dir:
+
+```bash
+FLEET_DATA_DIR=/tmp/fleet-test FLEET_ARTIFACT_DIR=/tmp/fleet-test/store FLEET_PORT=8799 npm start
+```
+
+then `FLEET_URL=http://127.0.0.1:8799 npm run smoke`.
+
+## Running under launchd
+
+[`deploy/com.addisdev.fleet-collector.plist`](deploy/com.addisdev.fleet-collector.plist)
+keeps the collector up: `KeepAlive` revives it however it dies, which is the
+point — the fleet's devices long-poll this service, so a crash that goes
+unnoticed strands every runner.
+
+```bash
+cp deploy/com.addisdev.fleet-collector.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.addisdev.fleet-collector.plist
+```
+
+- **Stop it** with `launchctl bootout gui/$(id -u)/com.addisdev.fleet-collector`.
+  Killing the process does nothing lasting; launchd starts it straight back.
+- **Do not `npm start` while it is loaded** — the port is taken, and the second
+  copy exits with `EADDRINUSE` while looking, for a moment, like it worked.
+- **Logs** go to `~/Library/Logs/fleet-collector.log` (both streams). launchd
+  does not rotate it and the collector logs a line per request, so check its size
+  occasionally.
+- **Paths inside the plist are absolute**, including the data and artifact dirs.
+  Move the checkout and you must edit them.
+- This is a LaunchAgent, so it starts **at login**, not at boot. A Mac mini that
+  reboots unattended needs either automatic login, or the same job installed as a
+  root-owned LaunchDaemon in `/Library/LaunchDaemons`.
+
+After `npm install` upgrades tsx, confirm `node_modules/tsx/dist/cli.mjs` still
+exists — the plist invokes it directly to avoid depending on a login `PATH`.
+
 ## Endpoints
 
 | Method & path | Purpose |
