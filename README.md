@@ -70,7 +70,16 @@ exists — the plist invokes it directly to avoid depending on a login `PATH`.
 | `POST /results` | Result rows (`kind: "result"`, idempotent by job/device/iter) and telemetry (`kind: "beacon"`, which renews the job's lease); `final: true` closes the job |
 | `POST /artifacts` | Upload raw bytes (models or app builds); returns `sha256` |
 | `GET /artifacts/:sha256` | Download, supports Range requests |
+| `POST /schedules` / `GET /schedules` | Upsert / list cron schedules (5-field cron + job template, `enabled` off by default) |
+| `PATCH /schedules/:id` / `DELETE /schedules/:id` | Enable/disable or remove a schedule |
+| `POST /schedules/tick` | Force a scheduler evaluation now (fires due schedules at most once per minute) |
+| `POST /locks/acquire` / `POST /locks/release` | Host-executor device locks for `targets.exclusive` jobs; device-executor claims lock implicitly |
+| `POST /power/:pool/:state` | Fire the pool's smart-plug webhook (`on`/`off`) from `power.json` — see `power.example.json` |
 | `GET /dash` | Server-rendered dashboard |
+
+`POST /jobs` with `"fanout": true` (device-executor only) enqueues one pinned
+child job per registered device in `targets.pool` — a whole-shelf benchmark is
+one request. Nightly runs are schedules whose template does exactly that.
 
 Job and result shapes are documented in [`schemas/`](schemas/) (`"schema": 1`).
 

@@ -1,0 +1,9 @@
+{
+  "//": "Copy to power.json (gitignored). Each pool maps to smart-plug webhooks — Tasmota, Shelly, or Home Assistant all speak this shape. The collector POSTs the URL on /power/<pool>/<on|off>; Phase 4's drain workloads will call these to unplug the battery pool before a run and restore the 40-70% charge band after.",
+  "pools": {
+    "battery": {
+      "on": "http://192.168.1.60/cm?cmnd=Power%20On",
+      "off": "http://192.168.1.60/cm?cmnd=Power%20Off"
+    }
+  }
+}

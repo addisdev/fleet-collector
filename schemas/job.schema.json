@@ -65,12 +65,17 @@
       },
       "additionalProperties": false
     },
+    "fanout": {
+      "type": "boolean",
+      "description": "device-executor only: enqueue one child job per registered device in targets.pool (or all devices), each pinned via targets.device_id with job_id suffixed --<device_id>"
+    },
     "targets": {
       "type": "object",
       "properties": {
         "pool": { "type": "string" },
+        "device_id": { "type": "string", "description": "pin this job to exactly one device-executor agent" },
         "match": { "type": "string", "description": "expression matching device descriptors — not evaluated in Phase 0" },
-        "exclusive": { "type": "boolean" }
+        "exclusive": { "type": "boolean", "description": "host jobs: hold collector device locks on all targets while running, starving device-executor agents until release" }
       }
     },
     "constraints": {

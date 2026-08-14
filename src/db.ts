@@ -61,6 +61,23 @@ CREATE TABLE IF NOT EXISTS artifacts (
   size       INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id         TEXT PRIMARY KEY,
+  cron       TEXT NOT NULL,           -- 5-field cron expression
+  template   TEXT NOT NULL,           -- JSON job spec without job_id
+  enabled    INTEGER NOT NULL DEFAULT 0,
+  last_run   TEXT,                    -- ISO minute of the last firing (dedup)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- A device works one job at a time. Device-executor claims take the lock
+-- implicitly; the host executor acquires explicitly for exclusive jobs.
+CREATE TABLE IF NOT EXISTS device_locks (
+  device_id   TEXT PRIMARY KEY,
+  job_id      TEXT NOT NULL,
+  acquired_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 // CREATE TABLE IF NOT EXISTS is a no-op on a database that predates a column,

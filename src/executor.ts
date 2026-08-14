@@ -21,6 +21,7 @@ type Job = {
   workload: string;
   app?: { name: string; build: string; sha256: string; platform?: "android" | "ios" };
   suite?: { kind: string; flows: string };
+  targets?: { pool?: string; exclusive?: boolean };
   params?: Record<string, unknown>;
 };
 
@@ -39,6 +40,27 @@ async function post(url: string, body: unknown) {
 
 async function postResult(row: Record<string, unknown>) {
   await post("/results", { schema: 1, kind: "result", ...row });
+}
+
+// Exclusive jobs hold the collector's device locks while they run, so a
+// device-executor agent never gets handed work mid-UI-test.
+async function acquireLocks(jobId: string, deviceIds: string[]): Promise<Set<string>> {
+  const res = await fetch(`${BASE}/locks/acquire`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ job_id: jobId, device_ids: deviceIds }),
+  });
+  if (!res.ok) throw new Error(`locks/acquire -> ${res.status}`);
+  const body = (await res.json()) as { granted: string[] };
+  return new Set(body.granted);
+}
+
+async function releaseLocks(jobId: string) {
+  await fetch(`${BASE}/locks/release`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ job_id: jobId }),
+  }).catch(() => {});
 }
 
 async function adbDevices(): Promise<string[]> {
@@ -172,9 +194,22 @@ async function runUiTest(job: Job) {
   const appIdMatch = /^appId:\s*(\S+)/m.exec(readFileSync(flows, "utf8"));
   const appId = appIdMatch?.[1];
 
+  const granted = job.targets?.exclusive
+    ? await acquireLocks(job.job_id, targets.map((t) => t.id))
+    : null;
+
   let allOk = true;
+  try {
   for (const target of targets) {
     const serial = target.id;
+    if (granted && !granted.has(serial)) {
+      await postResult({
+        job_id: job.job_id, device_id: serial, iter: 0, ok: true,
+        error: "skipped: device locked by another job",
+      });
+      log(`ui-test on ${serial}: skipped (locked)`);
+      continue;
+    }
     if (appId && !(await hasApp(target, appId))) {
       await postResult({
         job_id: job.job_id, device_id: serial, iter: 0, ok: true,
@@ -210,6 +245,9 @@ async function runUiTest(job: Job) {
       ok: failed === 0, test: { passed, failed, artifacts },
     });
     log(`ui-test on ${serial}: ${passed} passed / ${failed} failed`);
+  }
+  } finally {
+    if (granted) await releaseLocks(job.job_id);
   }
   await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
 }

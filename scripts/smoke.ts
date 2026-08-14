@@ -249,5 +249,90 @@ console.log(`smoke against ${BASE}`);
   check("dashboard explains the lease failure", html.includes(LEASE_JOB) && html.includes("gave up after 2/2 attempts"));
 }
 
+// 12. fan-out: one child job per pool device, pinned so only that device claims it
+{
+  const OTHER = `smoke-tab-${run}`;
+  await json("POST", "/devices/register", {
+    device_id: OTHER,
+    descriptor: { model: "Tab", ram_mb: 4096, os: "android-11" },
+    pools: ["ml-capable"],
+  });
+  const r = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-fan-${run}`, workload: "benchmark", executor: "device",
+    backend: "synthetic", fanout: true, targets: { pool: "ml-capable" },
+  });
+  const created = (r.body?.fanout ?? []) as string[];
+  check(
+    "fanout creates children for both pool devices",
+    r.status === 201 &&
+      created.includes(`smoke-fan-${run}--${DEVICE}`) &&
+      created.includes(`smoke-fan-${run}--${OTHER}`),
+    JSON.stringify(r.body),
+  );
+
+  // OTHER may only claim its own pinned child, never the first device's.
+  const claimed = await json("GET", `/devices/${OTHER}/next-job`);
+  check(
+    "fanout child is pinned to its device",
+    claimed.status === 200 && claimed.body?.targets?.device_id === OTHER,
+    JSON.stringify(claimed.body),
+  );
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: claimed.body.job_id, device_id: OTHER, iter: 0, final: true, ok: true,
+  });
+  // Drain DEVICE's own pinned child so later sections see an empty queue.
+  const mine = await json("GET", `/devices/${DEVICE}/next-job`);
+  check("first device claims its own child", mine.status === 200 && mine.body?.job_id === `smoke-fan-${run}--${DEVICE}`);
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: mine.body.job_id, device_id: DEVICE, iter: 0, final: true, ok: true,
+  });
+}
+
+// 13. exclusive locks: a host lock starves the device agent until released
+{
+  const LOCK_JOB = `smoke-lock-${run}`;
+  const grant = await json("POST", "/locks/acquire", { job_id: LOCK_JOB, device_ids: [DEVICE] });
+  check("host acquires device lock", grant.status === 200 && grant.body?.granted?.includes(DEVICE));
+  const contested = await json("POST", "/locks/acquire", { job_id: "someone-else", device_ids: [DEVICE] });
+  check("second job is denied the lock", contested.body?.denied?.includes(DEVICE), JSON.stringify(contested.body));
+
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `${LOCK_JOB}-starved`, workload: "benchmark", executor: "device",
+    backend: "synthetic", targets: { device_id: DEVICE },
+  });
+  const denied = await json("GET", `/devices/${DEVICE}/next-job`);
+  check("locked device is not handed work", denied.status === 204, `status=${denied.status}`);
+
+  await json("POST", "/locks/release", { job_id: LOCK_JOB });
+  const after = await json("GET", `/devices/${DEVICE}/next-job`);
+  check("released device claims work again", after.status === 200 && after.body?.job_id === `${LOCK_JOB}-starved`);
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: `${LOCK_JOB}-starved`, device_id: DEVICE, iter: 0, final: true, ok: true,
+  });
+}
+
+// 14. scheduler: an every-minute schedule fires on tick, once per minute
+{
+  const SCHED = `smoke-sched-${run}`;
+  const bad = await json("POST", "/schedules", { id: SCHED, cron: "not a cron", template: {} });
+  check("invalid cron rejected", bad.status === 400);
+  const r = await json("POST", "/schedules", {
+    id: SCHED, cron: "* * * * *", enabled: true,
+    template: { schema: 1, workload: "benchmark", executor: "device", backend: "synthetic" },
+  });
+  check("schedule created", r.status === 201, JSON.stringify(r.body));
+  const tick = await json("POST", "/schedules/tick");
+  const fired = (tick.body?.fired ?? []) as string[];
+  check("tick fires the schedule", fired.some((j) => j.startsWith(SCHED)), JSON.stringify(tick.body));
+  const tick2 = await json("POST", "/schedules/tick");
+  check(
+    "same minute does not double-fire",
+    !((tick2.body?.fired ?? []) as string[]).some((j) => j.startsWith(SCHED)),
+    JSON.stringify(tick2.body),
+  );
+  const off = await json("PATCH", `/schedules/${SCHED}`, { enabled: false });
+  check("schedule disables", off.status === 200 && off.body?.enabled === false);
+}
+
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

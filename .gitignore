@@ -3,3 +3,4 @@ data/
 artifacts/store/
 *.log
 .DS_Store
+power.json

@@ -1,10 +1,11 @@
 import Fastify from "fastify";
 import { createHash } from "node:crypto";
-import { createReadStream, statSync, existsSync, mkdirSync } from "node:fs";
+import { createReadStream, statSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { db } from "./db.js";
 import { renderDash } from "./dash.js";
+import { cronMatches, isValidCron, minuteKey } from "./cron.js";
 
 const PORT = Number(process.env.FLEET_PORT ?? 8787);
 const ARTIFACT_DIR = process.env.FLEET_ARTIFACT_DIR ?? path.resolve("artifacts/store");
@@ -39,10 +40,14 @@ type JobSpec = {
   job_id: string;
   workload: string;
   executor: "device" | "host";
-  targets?: { pool?: string; match?: string; exclusive?: boolean };
+  fanout?: boolean;
+  targets?: { pool?: string; match?: string; exclusive?: boolean; device_id?: string };
   lease?: { ttl_s?: number; max_attempts?: number };
   [k: string]: unknown;
 };
+
+const SCHEDULER_TICK_MS = Number(process.env.FLEET_SCHEDULER_TICK_MS ?? 20_000);
+const POWER_CONFIG_PATH = process.env.FLEET_POWER_CONFIG ?? path.resolve("power.json");
 
 const WORKLOADS = new Set(["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak"]);
 
@@ -53,19 +58,33 @@ function touchDevice(deviceId: string) {
 // Atomically claim the oldest queued job this claimant is eligible for, and
 // start its lease clock.
 const claimTx = db.transaction((executor: string, claimant: string, devicePools: string[]): JobSpec | null => {
+  if (executor === "device") {
+    // A host-executor job holding this device (exclusive ui-test, drain…)
+    // means the agent must idle until the lock is released.
+    const locked = db.prepare("SELECT job_id FROM device_locks WHERE device_id = ?").get(claimant);
+    if (locked) return null;
+  }
   const rows = db
     .prepare("SELECT job_id, spec FROM jobs WHERE status = 'queued' AND executor = ? ORDER BY created_at")
     .all(executor) as { job_id: string; spec: string }[];
   for (const row of rows) {
     const spec = JSON.parse(row.spec) as JobSpec;
-    const pool = spec.targets?.pool;
-    if (executor === "device" && pool && !devicePools.includes(pool)) continue;
+    if (executor === "device") {
+      if (spec.targets?.device_id && spec.targets.device_id !== claimant) continue;
+      const pool = spec.targets?.pool;
+      if (pool && !devicePools.includes(pool)) continue;
+    }
     db.prepare(
       `UPDATE jobs SET status = 'claimed', claimed_by = ?, claimed_at = datetime('now'),
                        attempts = attempts + 1,
                        lease_deadline = datetime('now', '+' || lease_ttl_s || ' seconds')
        WHERE job_id = ?`,
     ).run(claimant, row.job_id);
+    if (executor === "device") {
+      db.prepare("INSERT OR REPLACE INTO device_locks (device_id, job_id) VALUES (?, ?)").run(
+        claimant, row.job_id,
+      );
+    }
     return spec;
   }
   return null;
@@ -106,6 +125,7 @@ const sweepLeasesTx = db.transaction((): { requeued: SweptJob[]; failed: SweptJo
 
   const requeued: SweptJob[] = [];
   const failed: SweptJob[] = [];
+  const dropLocks = db.prepare("DELETE FROM device_locks WHERE job_id = ?");
   for (const job of expired) {
     const who = job.claimed_by ?? "unknown claimant";
     if (job.attempts >= job.max_attempts) {
@@ -115,6 +135,7 @@ const sweepLeasesTx = db.transaction((): { requeued: SweptJob[]; failed: SweptJo
       requeue.run(`lease expired on ${who}; requeued after attempt ${job.attempts}/${job.max_attempts}`, job.job_id);
       requeued.push(job);
     }
+    dropLocks.run(job.job_id);
   }
   return { requeued, failed };
 });
@@ -184,6 +205,36 @@ app.post("/jobs", async (req, reply) => {
   // Persist the effective lease so runners see it in the spec they claim and
   // can pace their beacons against it.
   spec.lease = { ttl_s: ttlS, max_attempts: maxAttempts };
+
+  // Fan-out: one queued child per registered device in the target pool, each
+  // pinned via targets.device_id. Host jobs already fan across attached
+  // targets inside the executor, so fanout is a device-executor concept.
+  if (spec.fanout) {
+    if (spec.executor !== "device")
+      return reply.code(400).send({ error: "fanout is only for executor: device" });
+    const pool = spec.targets?.pool;
+    const devices = (
+      db.prepare("SELECT device_id, pools FROM devices").all() as { device_id: string; pools: string }[]
+    ).filter((d) => !pool || (JSON.parse(d.pools) as string[]).includes(pool));
+    if (devices.length === 0)
+      return reply.code(400).send({ error: `no registered devices${pool ? ` in pool ${pool}` : ""}` });
+
+    const insert = db.prepare(
+      "INSERT OR IGNORE INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    const created: string[] = [];
+    for (const d of devices) {
+      const child: JobSpec = {
+        ...spec,
+        job_id: `${spec.job_id}--${d.device_id}`,
+        targets: { ...spec.targets, device_id: d.device_id },
+      };
+      delete child.fanout;
+      const r = insert.run(child.job_id, child.executor, child.workload, JSON.stringify(child), ttlS, maxAttempts);
+      if (r.changes > 0) created.push(child.job_id);
+    }
+    return reply.code(201).send({ ok: true, fanout: created });
+  }
 
   try {
     db.prepare(
@@ -263,8 +314,123 @@ app.post("/results", async (req, reply) => {
     db.prepare(
       "UPDATE jobs SET status = ?, finished_at = datetime('now'), lease_deadline = NULL WHERE job_id = ?",
     ).run(b.ok === false ? "failed" : "done", b.job_id);
+    db.prepare("DELETE FROM device_locks WHERE job_id = ?").run(b.job_id);
   }
   return { ok: true };
+});
+
+// --- device locks (host executor coordination) ---
+
+const acquireLocksTx = db.transaction((jobId: string, deviceIds: string[]) => {
+  const granted: string[] = [];
+  const denied: string[] = [];
+  for (const id of deviceIds) {
+    const existing = db.prepare("SELECT job_id FROM device_locks WHERE device_id = ?").get(id) as
+      | { job_id: string }
+      | undefined;
+    if (!existing || existing.job_id === jobId) {
+      db.prepare("INSERT OR REPLACE INTO device_locks (device_id, job_id) VALUES (?, ?)").run(id, jobId);
+      granted.push(id);
+    } else {
+      denied.push(id);
+    }
+  }
+  return { granted, denied };
+});
+
+app.post("/locks/acquire", async (req, reply) => {
+  const b = req.body as { job_id?: string; device_ids?: string[] };
+  if (!b?.job_id || !Array.isArray(b.device_ids))
+    return reply.code(400).send({ error: "job_id and device_ids required" });
+  return { ok: true, ...acquireLocksTx(b.job_id, b.device_ids) };
+});
+
+app.post("/locks/release", async (req, reply) => {
+  const b = req.body as { job_id?: string };
+  if (!b?.job_id) return reply.code(400).send({ error: "job_id required" });
+  const released = db.prepare("DELETE FROM device_locks WHERE job_id = ?").run(b.job_id).changes;
+  return { ok: true, released };
+});
+
+// --- schedules (nightly runs are just cron-driven enqueues) ---
+
+type ScheduleRow = { id: string; cron: string; template: string; enabled: number; last_run: string | null };
+
+app.post("/schedules", async (req, reply) => {
+  const b = req.body as { id?: string; cron?: string; template?: JobSpec; enabled?: boolean };
+  if (!b?.id || !b.cron || !b.template)
+    return reply.code(400).send({ error: "id, cron, and template required" });
+  if (!isValidCron(b.cron)) return reply.code(400).send({ error: `invalid cron: ${b.cron}` });
+  if ((b.template as { job_id?: string }).job_id)
+    return reply.code(400).send({ error: "template must not carry job_id; the scheduler generates it" });
+  db.prepare(
+    `INSERT INTO schedules (id, cron, template, enabled) VALUES (?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET cron = excluded.cron, template = excluded.template, enabled = excluded.enabled`,
+  ).run(b.id, b.cron, JSON.stringify(b.template), b.enabled ? 1 : 0);
+  return reply.code(201).send({ ok: true, id: b.id, enabled: !!b.enabled });
+});
+
+app.get("/schedules", async () =>
+  (db.prepare("SELECT * FROM schedules ORDER BY id").all() as ScheduleRow[]).map((s) => ({
+    ...s, template: JSON.parse(s.template), enabled: !!s.enabled,
+  })));
+
+app.patch("/schedules/:id", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const b = req.body as { enabled?: boolean };
+  if (typeof b?.enabled !== "boolean") return reply.code(400).send({ error: "enabled (boolean) required" });
+  const changed = db.prepare("UPDATE schedules SET enabled = ? WHERE id = ?").run(b.enabled ? 1 : 0, id).changes;
+  if (!changed) return reply.code(404).send({ error: "not found" });
+  return { ok: true, id, enabled: b.enabled };
+});
+
+app.delete("/schedules/:id", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const changed = db.prepare("DELETE FROM schedules WHERE id = ?").run(id).changes;
+  if (!changed) return reply.code(404).send({ error: "not found" });
+  return { ok: true };
+});
+
+// Fire due schedules for the current minute (at most once per minute each).
+// Enqueues through POST /jobs via inject so fanout and validation apply.
+async function schedulerTick(now = new Date()): Promise<string[]> {
+  const key = minuteKey(now);
+  const due = (db.prepare("SELECT * FROM schedules WHERE enabled = 1").all() as ScheduleRow[]).filter(
+    (s) => s.last_run !== key && cronMatches(s.cron, now),
+  );
+  const fired: string[] = [];
+  for (const s of due) {
+    db.prepare("UPDATE schedules SET last_run = ? WHERE id = ?").run(key, s.id);
+    const jobId = `${s.id}-${key.replace(/[^0-9]/g, "")}`;
+    const res = await app.inject({
+      method: "POST", url: "/jobs",
+      payload: { ...JSON.parse(s.template), job_id: jobId },
+    });
+    if (res.statusCode === 201) fired.push(jobId);
+    else if (res.statusCode !== 409)
+      app.log.error({ schedule: s.id, status: res.statusCode, body: res.body }, "schedule enqueue failed");
+  }
+  return fired;
+}
+
+app.post("/schedules/tick", async () => ({ ok: true, fired: await schedulerTick() }));
+
+// --- power control (smart-plug webhooks per pool) ---
+
+app.post("/power/:pool/:state", async (req, reply) => {
+  const { pool, state } = req.params as { pool: string; state: string };
+  if (state !== "on" && state !== "off") return reply.code(400).send({ error: "state must be on|off" });
+  let config: { pools?: Record<string, Record<string, string>> };
+  try {
+    config = JSON.parse(readFileSync(POWER_CONFIG_PATH, "utf8"));
+  } catch {
+    return reply.code(404).send({ error: `no power config at ${POWER_CONFIG_PATH}` });
+  }
+  const url = config.pools?.[pool]?.[state];
+  if (!url) return reply.code(404).send({ error: `no ${state} webhook configured for pool ${pool}` });
+  const res = await fetch(url, { method: "POST" });
+  app.log.info({ pool, state, webhook_status: res.status }, "power webhook fired");
+  return { ok: res.ok, pool, state, webhook_status: res.status };
 });
 
 // --- artifacts (models and app builds, addressed by sha256) ---
@@ -321,4 +487,7 @@ app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
   app.log.info(`fleet-collector listening on :${PORT}`);
   sweepLeases(); // catch claims that lapsed while the collector was down
   setInterval(sweepLeases, SWEEP_MS).unref();
+  setInterval(() => {
+    schedulerTick().catch((e) => app.log.error(e, "scheduler tick failed"));
+  }, SCHEDULER_TICK_MS).unref();
 });

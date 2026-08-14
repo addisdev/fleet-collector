@@ -13,6 +13,12 @@ export function renderDash(): string {
   const results = db
     .prepare("SELECT * FROM results ORDER BY created_at DESC LIMIT 50")
     .all() as { job_id: string; device_id: string; iter: number; payload: string; created_at: string }[];
+  const schedules = db
+    .prepare("SELECT * FROM schedules ORDER BY id")
+    .all() as { id: string; cron: string; enabled: number; last_run: string | null }[];
+  const locks = db
+    .prepare("SELECT * FROM device_locks ORDER BY acquired_at")
+    .all() as { device_id: string; job_id: string; acquired_at: string }[];
 
   const deviceRows = devices
     .map((d) => {
@@ -93,5 +99,18 @@ export function renderDash(): string {
 <table><tr><th>Job</th><th>Workload</th><th>Executor</th><th>Status</th><th>Claimed by</th><th>Lease</th><th>Updated</th></tr>${jobRows}</table>
 <h2>Recent results</h2>
 <table><tr><th>Job</th><th>Device</th><th>Iter</th><th>Summary</th><th>At</th></tr>${resultRows}</table>
+<h2>Schedules (${schedules.length})</h2>
+<table><tr><th>ID</th><th>Cron</th><th>Enabled</th><th>Last run</th></tr>${schedules
+    .map(
+      (s) => `<tr><td><code>${esc(s.id)}</code></td><td><code>${esc(s.cron)}</code></td>
+        <td class="${s.enabled ? "st-done" : ""}">${s.enabled ? "on" : "off"}</td><td>${esc(s.last_run ?? "—")}</td></tr>`,
+    )
+    .join("")}</table>
+<h2>Device locks (${locks.length})</h2>
+<table><tr><th>Device</th><th>Held by job</th><th>Since</th></tr>${locks
+    .map(
+      (l) => `<tr><td><code>${esc(l.device_id)}</code></td><td><code>${esc(l.job_id)}</code></td><td>${esc(l.acquired_at)}</td></tr>`,
+    )
+    .join("")}</table>
 </body></html>`;
 }
