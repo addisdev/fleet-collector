@@ -24,6 +24,7 @@ artifacts; the summary lands in the results table.
 |---|---|---|---|---|
 | `plantnet-300k-resnet18` | `litert-community/PlantNet-300K-ResNet18-LiteRT` (Apache-2.0) | 1081 species | 47 MB fp32 | NCHW 224 |
 | `houseplants-47` | `AlyModrik41/House-Plants-Classification-TFLite-Model` | 47 houseplants | 30 MB fp32 | NHWC 224 |
+| `plantnet-300k-resnet18` **int8** | our post-training quantization of the above (`plant-id-assets/quantize_int8.py`, 100 validation-split calibration images, float I/O kept) | 1081 species | **12 MB** | NCHW 224 |
 
 ## Results (2026-08-15)
 
@@ -32,7 +33,15 @@ artifacts; the summary lands in the results table.
 | ATD emulator (android-14, 4 GB) | plantnet-300k-resnet18 | cpu | **77.5%** | **90.0%** | 54 | 57 | 80 |
 | ATD emulator | plantnet-300k-resnet18 | gpu → cpu fallback (no CL/GL on AVD) | 77.5% | 90.0% | 54 | — | — |
 | ATD emulator | houseplants-47 | cpu | n/a (47-class label space) | n/a | 69 | 77 | 62 |
-| SM-X930 (Dimensity 9400) | plantnet-300k-resnet18 | gpu | *queued — fan-out child fires when the tablet wakes* | | | | |
+| ATD emulator | **plantnet-300k-resnet18 int8** | cpu | **76.7%** | **88.3%** | **11** | **12** | 87 |
+| host Mac (XNNPACK, sanity) | plantnet-300k-resnet18 fp32 / int8 | cpu | 77.5% / 73.3% | 90.0% / 89.2% | — | — | — |
+| SM-X930 (Dimensity 9400) | fp32 (gpu) and int8 | | *queued — fan-out children fire when the tablet wakes* | | | | |
+
+The host fp32 accuracy matches the device fp32 accuracy exactly, which
+confirms the on-device preprocessing is bit-faithful. Host int8 differs
+slightly from device int8 (73.3% vs 76.7% top-1) because XNNPACK and the
+LiteRT reference int8 kernels round differently — both are within noise of
+each other on 120 images; quote the device number.
 
 Emulator numbers are for **pipeline validation and relative comparison
 only** — never quote them as device performance. The tablet row is the first
@@ -52,10 +61,16 @@ automatically.
    list" experience.
 3. **The houseplants-47 model is not comparable** on this set (different label
    space) but its latency shows a MobileNet-class model is not meaningfully
-   faster than the ResNet18 here — architecture size isn't the constraint;
-   the 47 MB download is. An int8 quantization of the ResNet18 (~12 MB) is
-   the next candidate to evaluate, plus a hybrid: on-device top-5, cloud
-   Plant.id only when confidence is low.
+   faster than the ResNet18 here — architecture size isn't the constraint.
+4. **int8 is the shipping candidate.** The quantized ResNet18 is **4× smaller
+   (12 MB vs 47 MB) and 5× faster (11 ms vs 54 ms p50)** for a 0.8-point top-1
+   and 1.7-point top-5 cost on this set. A 12 MB download is an in-app asset,
+   not an on-demand fetch; 11 ms means a live viewfinder is feasible on CPU
+   alone, no GPU delegate needed — which removes the whole class of GPU
+   delegate flakiness observed above. Recommended product shape: on-device
+   int8 top-5 as the "did you mean…" list, cloud Plant.id only when the top
+   score is below a confidence threshold (tunable from the per-image scores
+   in the report artifacts).
 4. **Min-spec floor:** decided by data, not guessing — the shelf fan-out will
    produce per-device p50/p95 as devices come online. Rule of thumb from
    these numbers: anything that sustains < 150 ms p95 is fine for a tap-to-ID
