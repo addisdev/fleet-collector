@@ -10,7 +10,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
   args.set(process.argv[i].replace(/^--/, ""), process.argv[i + 1]);
 }
 
-const BASE = (args.get("collector") ?? process.env.FLEET_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+const BASE = (args.get("collector") ?? process.env.FLEET_URL ?? "http://127.0.0.1:8788").replace(/\/$/, "");
 const JOB_FILE = args.get("job");
 const ARTIFACT = args.get("artifact");
 const TIMEOUT_S = Number(args.get("timeout") ?? 900);

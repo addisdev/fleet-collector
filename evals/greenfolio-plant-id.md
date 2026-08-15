@@ -35,6 +35,16 @@ artifacts; the summary lands in the results table.
 | ATD emulator | houseplants-47 | cpu | n/a (47-class label space) | n/a | 69 | 77 | 62 |
 | ATD emulator | **plantnet-300k-resnet18 int8** | cpu | **76.7%** | **88.3%** | **11** | **12** | 87 |
 | host Mac (XNNPACK, sanity) | plantnet-300k-resnet18 fp32 / int8 | cpu | 77.5% / 73.3% | 90.0% / 89.2% | — | — | — |
+| **iPhone 16 sim (iOS 18.4)** | **Core ML fp16** (`convert_coreml.py`, 23.5 MB) | coreml cpu¹ | **76.7%** | **90.0%** | **8.4** | 13.5 | 169 |
+| **iPhone 16 sim (iOS 18.4)** | **Core ML int8-weight** (11.8 MB) | coreml cpu¹ | **75.8%** | **90.8%** | **7.6** | 11.6 | 108 |
+
+¹ The iOS Simulator's emulated GPU/ANE returned an **all-zero logits tensor**
+for this model — silently, with no error — while `.cpuOnly` gave logits
+identical to the Mac. The iOS runner now forces CPU on simulators and labels
+it; real iPhones honor `compute_units: all` (ANE), which is where the iOS
+latency story actually gets decided. Cross-platform consistency check: Core ML
+fp16 vs LiteRT fp32 on identical images agree within 1 point top-1 and exactly
+on top-5 — both pipelines are faithful to the same weights.
 | SM-X930 (Dimensity 9400) | fp32 (gpu) and int8 | | *queued — fan-out children fire when the tablet wakes* | | | | |
 
 The host fp32 accuracy matches the device fp32 accuracy exactly, which
@@ -62,7 +72,13 @@ automatically.
 3. **The houseplants-47 model is not comparable** on this set (different label
    space) but its latency shows a MobileNet-class model is not meaningfully
    faster than the ResNet18 here — architecture size isn't the constraint.
-4. **int8 is the shipping candidate.** The quantized ResNet18 is **4× smaller
+4. **iOS is covered too — GreenFolio ships iOS-first, and now the eval speaks
+   for both platforms.** The Core ML build of the same weights (ImageNet
+   normalization folded in, so the app hands over raw pixels on both OSes)
+   matches Android's accuracy on identical images. Core ML's native fp16 is
+   23.5 MB and the int8-weight variant 11.8 MB — same size class as the
+   tflite int8, so the "in-app asset" recommendation holds on iOS.
+5. **int8 is the shipping candidate.** The quantized ResNet18 is **4× smaller
    (12 MB vs 47 MB) and 5× faster (11 ms vs 54 ms p50)** for a 0.8-point top-1
    and 1.7-point top-5 cost on this set. A 12 MB download is an in-app asset,
    not an on-demand fetch; 11 ms means a live viewfinder is feasible on CPU

@@ -1,9 +1,9 @@
 // End-to-end smoke: simulates one device-executor client and one host-executor
 // client against a running collector. Exercises every Phase 0 endpoint.
-// Usage: npm run smoke   (collector must be running on FLEET_URL, default :8787)
+// Usage: npm run smoke   (collector must be running on FLEET_URL, default :8788)
 import { createHash } from "node:crypto";
 
-const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8787";
+const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
 
 function check(name: string, cond: boolean, detail = "") {
@@ -367,6 +367,33 @@ console.log(`smoke against ${BASE}`);
   check("poll returns first event", p1.status === 200 && p1.body?.payload?.prompt === "first");
   const p2 = await json("GET", `/events/${TOPIC}/poll?after=${p1.body.id}`);
   check("cursor advances to second event", p2.status === 200 && p2.body?.payload?.prompt === "second");
+}
+
+// 17. targets.match: descriptor expressions gate claims and fan-out
+{
+  const BIG = `smoke-big-${run}`, SMALL = `smoke-small-${run}`;
+  await json("POST", "/devices/register", { device_id: BIG, descriptor: { model: "Big", ram_mb: 8000, os: "android-14" }, pools: ["match-pool"] });
+  await json("POST", "/devices/register", { device_id: SMALL, descriptor: { model: "Small", ram_mb: 2000, os: "android-11" }, pools: ["match-pool"] });
+  const bad = await json("POST", "/jobs", { schema: 1, job_id: `smoke-match-bad-${run}`, workload: "benchmark", executor: "device", targets: { match: "ram_mb >>> 4" } });
+  check("invalid match expression rejected", bad.status === 400, JSON.stringify(bad.body));
+  const fan = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-match-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
+    fanout: true, targets: { pool: "match-pool", match: "ram_mb >= 4000 && os ~ 'android'" },
+  });
+  const kids = (fan.body?.fanout ?? []) as string[];
+  check("fanout honors match (only the big device)", kids.length === 1 && kids[0].endsWith(BIG), JSON.stringify(fan.body));
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-match-claim-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
+    targets: { pool: "match-pool", match: "ram_mb < 3000" },
+  });
+  const bigClaim = await json("GET", `/devices/${BIG}/next-job`);
+  check("big device claims only its fanout child, not the <3000 job", bigClaim.status === 200 && bigClaim.body?.job_id === kids[0], JSON.stringify(bigClaim.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: kids[0], device_id: BIG, iter: 0, final: true, ok: true });
+  const bigAgain = await json("GET", `/devices/${BIG}/next-job`);
+  check("match excludes big device from the <3000 job", bigAgain.status === 204, `status=${bigAgain.status}`);
+  const smallClaim = await json("GET", `/devices/${SMALL}/next-job`);
+  check("small device claims the <3000 job", smallClaim.status === 200 && smallClaim.body?.job_id === `smoke-match-claim-${run}`, JSON.stringify(smallClaim.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: `smoke-match-claim-${run}`, device_id: SMALL, iter: 0, final: true, ok: true });
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

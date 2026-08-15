@@ -8,8 +8,9 @@ import path from "node:path";
 import { db } from "./db.js";
 import { renderDash, renderBench } from "./dash.js";
 import { cronMatches, isValidCron, minuteKey } from "./cron.js";
+import { evalMatch, isValidMatch } from "./match.js";
 
-const PORT = Number(process.env.FLEET_PORT ?? 8787);
+const PORT = Number(process.env.FLEET_PORT ?? 8788);
 const ARTIFACT_DIR = process.env.FLEET_ARTIFACT_DIR ?? path.resolve("artifacts/store");
 mkdirSync(ARTIFACT_DIR, { recursive: true });
 
@@ -63,11 +64,15 @@ function touchDevice(deviceId: string) {
 // Atomically claim the oldest queued job this claimant is eligible for, and
 // start its lease clock.
 const claimTx = db.transaction((executor: string, claimant: string, devicePools: string[]): JobSpec | null => {
+  let descriptor: Record<string, unknown> = {};
   if (executor === "device") {
     // A host-executor job holding this device (exclusive ui-test, drain…)
     // means the agent must idle until the lock is released.
     const locked = db.prepare("SELECT job_id FROM device_locks WHERE device_id = ?").get(claimant);
     if (locked) return null;
+    const dev = db.prepare("SELECT descriptor FROM devices WHERE device_id = ?").get(claimant) as
+      | { descriptor: string } | undefined;
+    descriptor = { ...(dev ? JSON.parse(dev.descriptor) : {}), device_id: claimant, pools: devicePools };
   }
   const rows = db
     .prepare("SELECT job_id, spec FROM jobs WHERE status = 'queued' AND executor = ? ORDER BY created_at")
@@ -78,6 +83,10 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
       if (spec.targets?.device_id && spec.targets.device_id !== claimant) continue;
       const pool = spec.targets?.pool;
       if (pool && !devicePools.includes(pool)) continue;
+      // targets.match: descriptor expression ("ram_mb >= 4000 && os ~ 'android'").
+      if (spec.targets?.match) {
+        try { if (!evalMatch(spec.targets.match, descriptor)) continue; } catch { continue; }
+      }
     }
     db.prepare(
       `UPDATE jobs SET status = 'claimed', claimed_by = ?, claimed_at = datetime('now'),
@@ -214,15 +223,28 @@ app.post("/jobs", async (req, reply) => {
   // Fan-out: one queued child per registered device in the target pool, each
   // pinned via targets.device_id. Host jobs already fan across attached
   // targets inside the executor, so fanout is a device-executor concept.
+  if (spec.targets?.match && !isValidMatch(spec.targets.match))
+    return reply.code(400).send({ error: `invalid targets.match expression: ${spec.targets.match}` });
+
   if (spec.fanout) {
     if (spec.executor !== "device")
       return reply.code(400).send({ error: "fanout is only for executor: device" });
     const pool = spec.targets?.pool;
+    const match = spec.targets?.match;
     const devices = (
-      db.prepare("SELECT device_id, pools FROM devices").all() as { device_id: string; pools: string }[]
-    ).filter((d) => !pool || (JSON.parse(d.pools) as string[]).includes(pool));
+      db.prepare("SELECT device_id, pools, descriptor FROM devices").all() as
+        { device_id: string; pools: string; descriptor: string }[]
+    ).filter((d) => {
+      const pools = JSON.parse(d.pools) as string[];
+      if (pool && !pools.includes(pool)) return false;
+      if (match) {
+        try { return evalMatch(match, { ...JSON.parse(d.descriptor), device_id: d.device_id, pools }); }
+        catch { return false; }
+      }
+      return true;
+    });
     if (devices.length === 0)
-      return reply.code(400).send({ error: `no registered devices${pool ? ` in pool ${pool}` : ""}` });
+      return reply.code(400).send({ error: `no registered devices${pool ? ` in pool ${pool}` : ""}${match ? ` matching ${match}` : ""}` });
 
     const insert = db.prepare(
       "INSERT OR IGNORE INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts) VALUES (?, ?, ?, ?, ?, ?)",

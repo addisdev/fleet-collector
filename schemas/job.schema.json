@@ -74,7 +74,7 @@
       "properties": {
         "pool": { "type": "string" },
         "device_id": { "type": "string", "description": "pin this job to exactly one device-executor agent" },
-        "match": { "type": "string", "description": "expression matching device descriptors — not evaluated in Phase 0" },
+        "match": { "type": "string", "description": "descriptor expression, e.g. \"ram_mb >= 4000 && os ~ 'android'\" — fields: model, soc, ram_mb, os, app_ver, device_id, pools; ops == != < <= > >= ~(regex) && || ! ( )" },
         "exclusive": { "type": "boolean", "description": "host jobs: hold collector device locks on all targets while running, starving device-executor agents until release" }
       }
     },

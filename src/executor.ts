@@ -10,7 +10,7 @@ import path from "node:path";
 
 const exec = promisify(execFile);
 
-const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8787";
+const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 const NAME = process.env.FLEET_EXECUTOR_NAME ?? os.hostname().replace(/\.local$/, "");
 const FLOWS_DIR = process.env.FLEET_FLOWS_DIR ?? path.resolve("flows");
 const MAESTRO = process.env.MAESTRO_BIN ?? path.join(os.homedir(), ".maestro/bin/maestro");
@@ -30,7 +30,7 @@ type Job = {
 const IOS_PROJECT = process.env.FLEET_IOS_PROJECT ??
   path.resolve("../fleet-runner-ios/FleetRunner.xcodeproj");
 
-type Target = { id: string; platform: "android" | "ios" };
+type Target = { id: string; platform: "android" | "ios"; kind?: "device" | "simulator" };
 
 const log = (msg: string) => console.log(`[executor:${NAME}] ${msg}`);
 
@@ -91,18 +91,43 @@ async function bootedSimulators(): Promise<string[]> {
   }
 }
 
-// Android serials plus booted iOS simulator UDIDs. Real iPhones via
-// devicectl are the remaining Phase 3b gap.
+// Physical iPhones/iPads paired with this Mac, via devicectl (Xcode 15+).
+// Requires the device to be connected (USB or Wi-Fi) and trusted; installs
+// need a build signed for it (TestFlight / dev profile), which is the app
+// repo's problem, not the fleet's.
+async function connectedIosDevices(): Promise<string[]> {
+  try {
+    const out = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-dc-")), "devices.json");
+    await exec("xcrun", ["devicectl", "list", "devices", "--json-output", out], { timeout: 30_000 });
+    const parsed = JSON.parse(readFileSync(out, "utf8")) as {
+      result?: { devices?: { identifier: string; connectionProperties?: { tunnelState?: string } }[] };
+    };
+    return (parsed.result?.devices ?? [])
+      .filter((d) => d.connectionProperties?.tunnelState === "connected")
+      .map((d) => d.identifier);
+  } catch {
+    return [];
+  }
+}
+
+// Android serials, booted iOS simulator UDIDs, and connected physical iOS
+// devices (devicectl identifiers).
 async function listTargets(): Promise<Target[]> {
-  const android = (await adbDevices()).map((id): Target => ({ id, platform: "android" }));
-  const ios = (await bootedSimulators()).map((id): Target => ({ id, platform: "ios" }));
-  return [...android, ...ios];
+  const android = (await adbDevices()).map((id): Target => ({ id, platform: "android", kind: "device" }));
+  const sims = (await bootedSimulators()).map((id): Target => ({ id, platform: "ios", kind: "simulator" }));
+  const phones = (await connectedIosDevices()).map((id): Target => ({ id, platform: "ios", kind: "device" }));
+  return [...android, ...sims, ...phones];
 }
 
 async function hasApp(target: Target, appId: string): Promise<boolean> {
   try {
     if (target.platform === "android") {
       await exec(ADB, ["-s", target.id, "shell", "pm", "path", appId], { timeout: 15_000 });
+    } else if (target.kind === "device") {
+      const out = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-dc-")), "apps.json");
+      await exec("xcrun", ["devicectl", "device", "info", "apps", "--device", target.id, "--json-output", out], { timeout: 30_000 });
+      const parsed = JSON.parse(readFileSync(out, "utf8")) as { result?: { apps?: { bundleIdentifier: string }[] } };
+      return (parsed.result?.apps ?? []).some((a) => a.bundleIdentifier === appId);
     } else {
       await exec("xcrun", ["simctl", "get_app_container", target.id, appId], { timeout: 15_000 });
     }
@@ -160,6 +185,8 @@ async function runInstall(job: Job) {
     try {
       if (platform === "android") {
         await exec(ADB, ["-s", target.id, "install", "-r", installable], { timeout: 120_000 });
+      } else if (target.kind === "device") {
+        await exec("xcrun", ["devicectl", "device", "install", "app", "--device", target.id, installable], { timeout: 300_000 });
       } else {
         await exec("xcrun", ["simctl", "install", target.id, installable], { timeout: 120_000 });
       }
@@ -338,6 +365,10 @@ async function postBeacon(jobId: string, deviceId: string, extra: Record<string,
 }
 
 async function launchApp(target: Target, appId: string) {
+  if (target.platform === "ios" && target.kind === "device") {
+    await exec("xcrun", ["devicectl", "device", "process", "launch", "--device", target.id, appId], { timeout: 60_000 });
+    return;
+  }
   if (target.platform === "android") {
     // Resolve the real launcher activity; monkey is a fallback because some
     // images (ATD) resolve but throttle monkey events.
@@ -372,14 +403,141 @@ async function processAlive(target: Target, appId: string): Promise<boolean> {
 }
 
 async function batteryPct(target: Target): Promise<number | null> {
-  if (target.platform !== "android") return null; // simulators have no battery
   try {
-    const { stdout } = await exec(ADB, ["-s", target.id, "shell", "dumpsys", "battery"], { timeout: 15_000 });
-    const m = /level:\s*(\d+)/.exec(stdout);
-    return m ? Number(m[1]) : null;
+    if (target.platform === "android") {
+      const { stdout } = await exec(ADB, ["-s", target.id, "shell", "dumpsys", "battery"], { timeout: 15_000 });
+      const m = /level:\s*(\d+)/.exec(stdout);
+      return m ? Number(m[1]) : null;
+    }
+    if (target.kind === "device") {
+      // devicectl exposes battery via device info; the fleet runner's beacon
+      // is the primary source on real iPhones — this is the host-side cross-check.
+      const out = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-dc-")), "info.json");
+      await exec("xcrun", ["devicectl", "device", "info", "details", "--device", target.id, "--json-output", out], { timeout: 30_000 });
+      const txt = readFileSync(out, "utf8");
+      const m = /"batteryLevel"\s*:\s*([0-9.]+)/.exec(txt);
+      return m ? Math.round(Number(m[1]) * (Number(m[1]) <= 1 ? 100 : 1)) : null;
+    }
+    return null; // simulators have no battery
   } catch {
     return null;
   }
+}
+
+// Location replay: feed the device a recorded route so a drain run walks the
+// same path every night with the real GPS radio on. Simulators take a GPX
+// file directly; Android uses the mock-location provider (the app under test
+// must allow mock locations in its debug build); real iPhones need the app's
+// own debug replay provider (devicectl has no location injection).
+async function replayLocation(target: Target, gpxPath: string): Promise<string> {
+  if (target.platform === "ios" && target.kind === "simulator") {
+    await exec("xcrun", ["simctl", "location", target.id, "start", "--speed=1.4", gpxPath], { timeout: 30_000 });
+    return "simctl location (gpx replay)";
+  }
+  if (target.platform === "android") {
+    // Parse trackpoints and push them one at a time via the emulator geo
+    // console (emulators) or the mock provider (devices with fleet-runner as
+    // mock app). Emulator path here; device path is best-effort.
+    const gpx = readFileSync(gpxPath, "utf8");
+    const pts = [...gpx.matchAll(/<trkpt[^>]*lat="([-0-9.]+)"[^>]*lon="([-0-9.]+)"/g)].map((m) => [Number(m[1]), Number(m[2])]);
+    if (target.id.startsWith("emulator-")) {
+      // Fire-and-forget replay: one fix per second, in the background.
+      (async () => {
+        for (const [lat, lon] of pts) {
+          await exec(ADB, ["-s", target.id, "emu", "geo", "fix", String(lon), String(lat)], { timeout: 10_000 }).catch(() => {});
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      })();
+      return `adb emu geo fix (${pts.length} points)`;
+    }
+    return `no injection path for physical Android; app-side replay required (${pts.length} points parsed)`;
+  }
+  return "no injection path for physical iOS; app-side replay required";
+}
+
+// Drain: unplugged battery-drain curve for an app scenario. Launches the app,
+// optionally replays a GPX route, and samples battery + process-alive every
+// interval — each sample renews the lease. Result: the drain curve (per-check
+// rows), start/end %, and %/hour. Honest about preconditions: refuses when
+// the device is charging (a drain test on a charger is meaningless) unless
+// params.allow_charging is set for pipeline validation.
+async function runDrain(job: Job) {
+  const appId = job.params?.app_id as string | undefined;
+  if (!appId) throw new Error("drain job needs params.app_id");
+  const durationS = Number(job.params?.duration_s ?? 3600);
+  const intervalS = Number(job.params?.interval_s ?? 60);
+  const gpxSha = job.params?.gpx_sha256 as string | undefined;
+  const allowCharging = job.params?.allow_charging === true;
+  const platform = job.app?.platform ?? "android";
+  const targets = (await listTargets()).filter((t) => t.platform === platform);
+  if (targets.length === 0) throw new Error(`no ${platform} targets attached`);
+
+  let gpxPath: string | undefined;
+  if (gpxSha) {
+    gpxPath = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-gpx-")), "route.gpx");
+    await fetchArtifact(gpxSha, gpxPath);
+  }
+
+  const start = new Map<string, number | null>();
+  const eligible: Target[] = [];
+  for (const t of targets) {
+    if (!(await hasApp(t, appId))) {
+      await postResult({ job_id: job.job_id, device_id: t.id, iter: 0, ok: true, error: `skipped: ${appId} not installed` });
+      continue;
+    }
+    // Precondition: not charging. Android reports it via dumpsys; sims never charge.
+    if (t.platform === "android" && !allowCharging) {
+      const { stdout } = await exec(ADB, ["-s", t.id, "shell", "dumpsys", "battery"], { timeout: 15_000 }).catch(() => ({ stdout: "" }));
+      if (/(AC|USB|Wireless) powered: true/.test(stdout)) {
+        await postResult({ job_id: job.job_id, device_id: t.id, iter: 0, ok: false, error: "drain precondition failed: device is charging (unplug, or set the pool's power webhook)" });
+        continue;
+      }
+    }
+    await launchApp(t, appId).catch(() => {});
+    let replay = "none";
+    if (gpxPath) replay = await replayLocation(t, gpxPath).catch((e) => `replay failed: ${(e as Error).message}`);
+    start.set(t.id, await batteryPct(t));
+    log(`drain ${appId} on ${t.id}: start ${start.get(t.id)}% · location: ${replay}`);
+    eligible.push(t);
+  }
+  if (eligible.length === 0) {
+    await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false, error: "no eligible targets (not installed / charging)" });
+    return;
+  }
+
+  const t0 = Date.now();
+  const deadline = t0 + durationS * 1000;
+  let iter = 0;
+  const alive = new Map(eligible.map((t) => [t.id, true]));
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, Math.min(intervalS * 1000, deadline - Date.now())));
+    iter += 1;
+    for (const t of eligible) {
+      const isAlive = await processAlive(t, appId);
+      if (!isAlive) alive.set(t.id, false);
+      const battery = await batteryPct(t);
+      await postBeacon(job.job_id, t.id, { process_alive: { [appId]: isAlive }, ...(battery !== null ? { battery_pct: battery } : {}) });
+      await postResult({ job_id: job.job_id, device_id: t.id, iter, ok: isAlive,
+        metrics: { battery_end_pct: battery, ttft_ms: (Date.now() - t0) / 1000 },
+        error: isAlive ? undefined : `process ${appId} not running at check ${iter}` });
+    }
+  }
+  if (gpxPath) for (const t of eligible) if (t.platform === "ios" && t.kind === "simulator")
+    await exec("xcrun", ["simctl", "location", t.id, "clear"], { timeout: 15_000 }).catch(() => {});
+
+  let allOk = true;
+  for (const t of eligible) {
+    const s = start.get(t.id); const e = await batteryPct(t);
+    const hours = (Date.now() - t0) / 3_600_000;
+    const perHour = s !== null && s !== undefined && e !== null && hours > 0 ? (s - e) / hours : null;
+    const ok = alive.get(t.id) ?? false;
+    if (!ok) allOk = false;
+    await postResult({ job_id: job.job_id, device_id: t.id, iter: 0, ok,
+      metrics: { battery_start_pct: s, battery_end_pct: e, decode_tok_s: perHour /* %/hour in the numeric slot for the bench page */ },
+      error: ok ? undefined : `${appId} died during the drain run` });
+    log(`drain ${appId} on ${t.id}: ${s}% -> ${e}% (${perHour?.toFixed(1) ?? "?"} %/h) ${ok ? "" : "APP DIED"}`);
+  }
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
 }
 
 // Soak: launch the app, then prove it stays alive — the whole measurement for
@@ -453,6 +611,7 @@ async function main() {
       if (job.workload === "install") await runInstall(job);
       else if (job.workload === "ui-test") await runUiTest(job);
       else if (job.workload === "soak") await runSoak(job);
+      else if (job.workload === "drain") await runDrain(job);
       else {
         await postResult({
           job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,

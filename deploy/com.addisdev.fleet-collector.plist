@@ -46,6 +46,11 @@
     <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/data</string>
     <key>FLEET_ARTIFACT_DIR</key>
     <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/artifacts/store</string>
+    <!-- 8788: 8787 was taken by another project's dev dashboard on this Mac,
+         and a KeepAlive collector that can't bind just respawns forever while
+         every fleet client talks to the wrong service. -->
+    <key>FLEET_PORT</key>
+    <string>8788</string>
   </dict>
 
   <!-- launchd does not rotate these; the collector logs a line per request, so

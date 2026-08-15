@@ -10,7 +10,7 @@ Tailscale mesh. Runs under `launchd` on the Mac mini.
 
 ```
 npm install
-npm start          # collector on :8787 (FLEET_PORT to change)
+npm start          # collector on :8788 (FLEET_PORT to change)
 npm run executor   # host executor: claims host jobs, drives devices via adb + Maestro
 npm run smoke      # end-to-end check against a running collector
 ```
