@@ -177,6 +177,17 @@ app.post("/devices/register", async (req, reply) => {
   return { ok: true };
 });
 
+app.get("/devices", async () =>
+  (db.prepare("SELECT * FROM devices ORDER BY last_seen DESC").all() as
+    { device_id: string; descriptor: string; pools: string; last_seen: string; last_beacon: string | null }[])
+    .map((d) => ({
+      device_id: d.device_id,
+      descriptor: JSON.parse(d.descriptor),
+      pools: JSON.parse(d.pools),
+      last_seen: d.last_seen,
+      last_beacon: d.last_beacon ? JSON.parse(d.last_beacon) : null,
+    })));
+
 app.get("/devices/:id/next-job", async (req, reply) => {
   const { id } = req.params as { id: string };
   const dev = db.prepare("SELECT pools FROM devices WHERE device_id = ?").get(id) as
