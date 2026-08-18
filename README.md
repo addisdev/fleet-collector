@@ -3,8 +3,8 @@
 Phase 0 of the Fleet Runner plan: the collector service — device registry, job
 queue, artifact store, results DB, and dashboard for the device fleet.
 
-Node + Fastify + SQLite (WAL). No auth: the collector is only reachable over the
-Tailscale mesh. Runs under `launchd` on the Mac mini.
+Node + Fastify + SQLite (WAL). No auth: it is only reachable on the LAN, and
+is meant to stay that way. Runs under `launchd` on **fleet-host** (see below).
 
 ## Run
 
@@ -28,6 +28,26 @@ FLEET_DATA_DIR=/tmp/fleet-test FLEET_ARTIFACT_DIR=/tmp/fleet-test/store FLEET_PO
 ```
 
 then `FLEET_URL=http://127.0.0.1:8799 npm run smoke`.
+
+## Where it runs
+
+The collector lives on **fleet-host** (`C02TF32MGTFM.local`, `192.168.50.27:8788`)
+— a 2016 MacBook Pro that does nothing else. It is deliberately sudo-free:
+Node is a user-local tarball in `~/.local/node`, the service is a LaunchAgent in
+`~/Library/LaunchAgents`, and `better-sqlite3` installs from a prebuild, so the
+whole stack can be rebuilt over SSH with nobody at the keyboard. Deploy with
+[`deploy/adopt-fleet-host.sh`](deploy/adopt-fleet-host.sh) and the
+`*.fleet-host.plist` variant.
+
+Executors stay on whichever machine the devices are physically attached to —
+they reach the collector over the LAN with `FLEET_URL`:
+
+```bash
+FLEET_URL=http://192.168.50.27:8788 npm run executor
+```
+
+Runner apps default to that address too. Give the host a DHCP reservation; a
+lease change would strand every device at once.
 
 ## Running under launchd
 

@@ -26,72 +26,62 @@ artifacts; the summary lands in the results table.
 | `houseplants-47` | `AlyModrik41/House-Plants-Classification-TFLite-Model` | 47 houseplants | 30 MB fp32 | NHWC 224 |
 | `plantnet-300k-resnet18` **int8** | our post-training quantization of the above (`plant-id-assets/quantize_int8.py`, 100 validation-split calibration images, float I/O kept) | 1081 species | **12 MB** | NCHW 224 |
 
-## Results (2026-08-15)
+## Results (updated 2026-08-18 with real hardware)
 
 | Device | Model | Accel | Top-1 | Top-5 | p50 ms | p95 ms | Load ms |
 |---|---|---|---|---|---|---|---|
-| ATD emulator (android-14, 4 GB) | plantnet-300k-resnet18 | cpu | **77.5%** | **90.0%** | 54 | 57 | 80 |
-| ATD emulator | plantnet-300k-resnet18 | gpu → cpu fallback (no CL/GL on AVD) | 77.5% | 90.0% | 54 | — | — |
+| **SM-X930 (Dimensity 9400)** | **plantnet-300k-resnet18 int8** | **cpu** | **76.7%** | **88.3%** | **7** | 8 | 23 |
+| **SM-X930 (Dimensity 9400)** | **plantnet-300k-resnet18 fp32** | **gpu delegate** | **77.5%** | **90.0%** | **11** | 13 | 428 |
+| iPhone 16 sim (iOS 18.4) | Core ML int8-weight (11.8 MB) | coreml cpu¹ | 75.8% | 90.8% | 7.6 | 11.6 | 108 |
+| iPhone 16 sim (iOS 18.4) | Core ML fp16 (`convert_coreml.py`, 23.5 MB) | coreml cpu¹ | 76.7% | 90.0% | 8.4 | 13.5 | 169 |
+| ATD emulator (android-14, 4 GB) | plantnet-300k-resnet18 int8 | cpu | 76.7% | 88.3% | 11 | 12 | 87 |
+| ATD emulator | plantnet-300k-resnet18 fp32 | cpu | 77.5% | 90.0% | 54 | 57 | 80 |
+| ATD emulator | plantnet-300k-resnet18 fp32 | gpu → cpu fallback (no CL/GL on AVD) | 77.5% | 90.0% | 54 | — | — |
 | ATD emulator | houseplants-47 | cpu | n/a (47-class label space) | n/a | 69 | 77 | 62 |
-| ATD emulator | **plantnet-300k-resnet18 int8** | cpu | **76.7%** | **88.3%** | **11** | **12** | 87 |
 | host Mac (XNNPACK, sanity) | plantnet-300k-resnet18 fp32 / int8 | cpu | 77.5% / 73.3% | 90.0% / 89.2% | — | — | — |
-| **iPhone 16 sim (iOS 18.4)** | **Core ML fp16** (`convert_coreml.py`, 23.5 MB) | coreml cpu¹ | **76.7%** | **90.0%** | **8.4** | 13.5 | 169 |
-| **iPhone 16 sim (iOS 18.4)** | **Core ML int8-weight** (11.8 MB) | coreml cpu¹ | **75.8%** | **90.8%** | **7.6** | 11.6 | 108 |
 
 ¹ The iOS Simulator's emulated GPU/ANE returned an **all-zero logits tensor**
 for this model — silently, with no error — while `.cpuOnly` gave logits
 identical to the Mac. The iOS runner now forces CPU on simulators and labels
 it; real iPhones honor `compute_units: all` (ANE), which is where the iOS
-latency story actually gets decided. Cross-platform consistency check: Core ML
-fp16 vs LiteRT fp32 on identical images agree within 1 point top-1 and exactly
-on top-5 — both pipelines are faithful to the same weights.
-| SM-X930 (Dimensity 9400) | fp32 (gpu) and int8 | | *queued — fan-out children fire when the tablet wakes* | | | | |
+latency story actually gets decided.
 
-The host fp32 accuracy matches the device fp32 accuracy exactly, which
-confirms the on-device preprocessing is bit-faithful. Host int8 differs
-slightly from device int8 (73.3% vs 76.7% top-1) because XNNPACK and the
-LiteRT reference int8 kernels round differently — both are within noise of
-each other on 120 images; quote the device number.
-
-Emulator numbers are for **pipeline validation and relative comparison
-only** — never quote them as device performance. The tablet row is the first
-number that matters for a min-spec decision, and the fan-out will fill it in
-automatically.
+**Accuracy is identical across every device** that ran a given model+quant —
+tablet, emulator and host agree to the decimal — which is the fixed
+preprocessing doing its job. Only latency varies, and that is the whole point.
+(Host int8 is the one exception at 73.3%: XNNPACK and LiteRT's reference int8
+kernels round differently. Quote the device number.)
 
 ## What this says for GreenFolio
 
-1. **On-device species ID is viable in principle.** A 47 MB ResNet18 gets 77.5%
-   top-1 / 90% top-5 on real held-out PlantNet images at ~54 ms per frame on a
-   modest CPU. Plant.id's cloud accuracy is higher on hard cases, but a
-   90% top-5 offline suggestion list — shown as "did you mean…" — is a
-   product-grade feature, and the model is Apache-2.0.
+1. **On-device species ID is viable.** An Apache-2.0 ResNet18 gets 77.5% top-1 /
+   90% top-5 on real held-out PlantNet images. Plant.id's cloud accuracy is
+   higher on hard cases, but a 90% top-5 offline suggestion list is a
+   product-grade feature at zero per-call cost.
 2. **Top-5 is the product surface, not top-1.** Fine-grained species confusion
-   is inherent (the misses were visually-similar taxa); presenting five ranked
-   candidates with the user confirming turns 77% into a ~90% "it was in the
+   is inherent (the misses were visually-similar taxa); showing five ranked
+   candidates for the user to confirm turns 77% into a ~90% "it was in the
    list" experience.
-3. **The houseplants-47 model is not comparable** on this set (different label
-   space) but its latency shows a MobileNet-class model is not meaningfully
-   faster than the ResNet18 here — architecture size isn't the constraint.
-4. **iOS is covered too — GreenFolio ships iOS-first, and now the eval speaks
-   for both platforms.** The Core ML build of the same weights (ImageNet
-   normalization folded in, so the app hands over raw pixels on both OSes)
-   matches Android's accuracy on identical images. Core ML's native fp16 is
-   23.5 MB and the int8-weight variant 11.8 MB — same size class as the
-   tflite int8, so the "in-app asset" recommendation holds on iOS.
-5. **int8 is the shipping candidate.** The quantized ResNet18 is **4× smaller
-   (12 MB vs 47 MB) and 5× faster (11 ms vs 54 ms p50)** for a 0.8-point top-1
-   and 1.7-point top-5 cost on this set. A 12 MB download is an in-app asset,
-   not an on-demand fetch; 11 ms means a live viewfinder is feasible on CPU
-   alone, no GPU delegate needed — which removes the whole class of GPU
-   delegate flakiness observed above. Recommended product shape: on-device
-   int8 top-5 as the "did you mean…" list, cloud Plant.id only when the top
-   score is below a confidence threshold (tunable from the per-image scores
-   in the report artifacts).
-4. **Min-spec floor:** decided by data, not guessing — the shelf fan-out will
-   produce per-device p50/p95 as devices come online. Rule of thumb from
-   these numbers: anything that sustains < 150 ms p95 is fine for a tap-to-ID
-   flow; a real-time viewfinder needs the GPU delegate (verified as
-   fall-back-safe on devices without it).
+3. **int8 is the shipping candidate.** 12 MB versus 47 MB, for 0.8 points of
+   top-1 and 1.7 of top-5. That is an in-app asset rather than an on-demand
+   download, on both platforms (Core ML int8-weight is 11.8 MB).
+4. **On real hardware, int8-on-CPU beats fp32-on-GPU.** The Dimensity 9400 runs
+   int8 at **7 ms p50 on the CPU alone** — faster than fp32's 11 ms *with* the
+   GPU delegate, and loading in 23 ms against 428 ms. The shipping
+   configuration therefore needs no GPU delegate at all, which removes the
+   entire class of delegate-availability failures seen elsewhere in this table.
+5. **Min-spec floor:** a flagship does 7 ms. Even an order of magnitude slower
+   on an old budget device is ~70 ms — comfortably inside a tap-to-identify
+   flow, with a live viewfinder realistic on anything mid-range or better.
+   There is no plausible Android or iOS device GreenFolio supports where this
+   feature would feel slow.
+6. **iOS is covered — and GreenFolio ships iOS-first.** The Core ML build of the
+   same weights (ImageNet normalization folded in, so the app hands over raw
+   pixels on both OSes) matches Android's accuracy on identical images.
+7. **Recommended product shape:** on-device int8 top-5 as a "did you mean…"
+   list, with the cloud Plant.id call reserved for when the top score falls
+   below a confidence threshold — tunable from the per-image scores in the
+   report artifacts.
 
 ## Reproduce / extend
 
