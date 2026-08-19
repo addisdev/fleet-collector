@@ -56,7 +56,7 @@ function EditableName({ device, onDone }: { device: Device; onDone: () => void }
             }
           }}
         />
-        {error && <span class="th-critical">{error}</span>}
+        {error && <span class="text-bad name-err">{error}</span>}
       </span>
     );
 

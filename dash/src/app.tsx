@@ -1,4 +1,5 @@
 import { useKeyboard, SHORTCUTS } from "./keys.js";
+import { TokenBanner } from "./TokenBanner.js";
 import { useLiveState } from "./live.js";
 import { match, useRoute } from "./router.js";
 import { Link, Panel } from "./ui.js";
@@ -134,6 +135,7 @@ export function App() {
         </nav>
         <LiveDot />
       </header>
+      <TokenBanner />
       <AlertBanner />
       <main>
         <Router />

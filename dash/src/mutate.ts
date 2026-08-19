@@ -38,6 +38,12 @@ export async function mutate<T>(method: "POST" | "PATCH" | "DELETE", path: strin
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const json = (await res.json().catch(() => ({}))) as { error?: string };
+  if (res.status === 401) {
+    // Naming the missing header is true and useless. Say what to do.
+    throw new ApiError(401, token
+      ? "That dashboard token was rejected. Check it on the System screen."
+      : "This collector needs a dashboard token — paste it in the banner above, or on the System screen.");
+  }
   if (!res.ok) throw new ApiError(res.status, json.error ?? `${res.status} ${res.statusText}`);
   return json as T;
 }

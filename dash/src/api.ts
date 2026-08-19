@@ -304,4 +304,5 @@ export type Health = {
   node: string;
   pid: number;
   stream_clients: number;
+  guard: boolean;
 };
