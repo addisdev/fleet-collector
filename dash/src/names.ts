@@ -19,9 +19,9 @@ const watchers = new Set<(n: Names) => void>();
 
 async function load(): Promise<Names> {
   const res = await fetch("/api/devices");
-  const body = (await res.json()) as { devices: { device_id: string; nickname: string | null }[] };
+  const body = (await res.json()) as { devices: { device_id: string; name: string | null }[] };
   cache = Object.fromEntries(
-    body.devices.filter((d) => d.nickname).map((d) => [d.device_id, d.nickname as string]),
+    body.devices.filter((d) => d.name).map((d) => [d.device_id, d.name as string]),
   );
   for (const w of watchers) w(cache);
   return cache;

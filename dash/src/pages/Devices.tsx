@@ -6,48 +6,72 @@ import { refreshNames } from "../names.js";
 import { useQuery } from "../router.js";
 import { Filters, Link, Loaded, Panel, Pill, Search, Select, Stat, agoFrom } from "../ui.js";
 
-/** Rename in place. Naming a shelf is a dozen small edits in one sitting, and
- *  making each one a trip to a detail page and back is how it does not happen. */
-function Rename({ device, onDone }: { device: Device; onDone: () => void }) {
+/**
+ * The device's name, editable by clicking it.
+ *
+ * No button and no separate column: the thing you want to change is the thing
+ * you click. An unnamed device shows its id, because until you name it that is
+ * its name — so the same click renames either case.
+ */
+function EditableName({ device, onDone }: { device: Device; onDone: () => void }) {
   const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(device.nickname ?? "");
+  const [value, setValue] = useState(device.name ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const save = useMutation(async () => {
-    const r = await mutate("PATCH", `/api/devices/${encodeURIComponent(device.device_id)}`, {
-      nickname: value.trim() || null,
-    });
-    await refreshNames();
-    setEditing(false);
-    onDone();
-    return r;
-  });
+  const commit = async () => {
+    const next = value.trim();
+    if (next === (device.name ?? "")) return setEditing(false);
+    setBusy(true);
+    try {
+      await mutate("PATCH", `/api/devices/${encodeURIComponent(device.device_id)}`, { name: next || null });
+      await refreshNames();
+      setEditing(false);
+      setError(null);
+      onDone();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  if (!editing)
+  if (editing)
     return (
-      <button type="button" class="linkish" onClick={() => setEditing(true)}>
-        {device.nickname ? "rename" : "name it"}
-      </button>
+      <span class="name-edit">
+        <input
+          autofocus
+          disabled={busy}
+          value={value}
+          placeholder={device.device_id}
+          onInput={(e) => setValue((e.target as HTMLInputElement).value)}
+          // Blur commits too: clicking away from a half-typed name and losing
+          // it is the most annoying way an inline editor can behave.
+          onBlur={() => void commit()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void commit();
+            if (e.key === "Escape") {
+              setValue(device.name ?? "");
+              setEditing(false);
+            }
+          }}
+        />
+        {error && <span class="th-critical">{error}</span>}
+      </span>
     );
 
   return (
-    <span class="rename">
-      <input
-        autofocus
-        value={value}
-        placeholder="shelf top left"
-        onInput={(e) => setValue((e.target as HTMLInputElement).value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void save.go();
-          if (e.key === "Escape") setEditing(false);
-        }}
-      />
-      <button type="button" class="linkish" disabled={save.busy} onClick={() => void save.go()}>
-        save
-      </button>
-      <button type="button" class="linkish" onClick={() => setEditing(false)}>
-        cancel
-      </button>
-    </span>
+    <button
+      type="button"
+      class="name-btn"
+      title={`${device.device_id} — click to rename`}
+      onClick={() => {
+        setValue(device.name ?? "");
+        setEditing(true);
+      }}
+    >
+      {device.name ? <strong>{device.name}</strong> : <code>{device.device_id}</code>}
+    </button>
   );
 }
 
@@ -126,7 +150,6 @@ export function Devices() {
                   <table>
                     <tr>
                       <th>Device</th>
-                      <th></th>
                       <th>Hardware</th>
                       <th>Pools</th>
                       <th>Battery</th>
@@ -137,23 +160,14 @@ export function Devices() {
                     {d.devices.map((dev) => (
                       <tr key={dev.device_id}>
                         <td class="wrap-anywhere">
-                          <Link to={`/devices/${encodeURIComponent(dev.device_id)}`}>
-                            {dev.nickname ? (
-                              <>
-                                <strong>{dev.nickname}</strong>
-                                <div class="faint mono devid">{dev.device_id}</div>
-                              </>
-                            ) : (
-                              <code>{dev.device_id}</code>
-                            )}
-                          </Link>
+                          <EditableName device={dev} onDone={state.reload} />
                           <div>
+                            <Link to={`/devices/${encodeURIComponent(dev.device_id)}`} class="faint open-link">
+                              open
+                            </Link>{" "}
                             <Pill kind={dev.status} />
                             {dev.simulator && <span class="faint"> simulator</span>}
                           </div>
-                        </td>
-                        <td>
-                          <Rename device={dev} onDone={state.reload} />
                         </td>
                         <td>
                           {String(dev.descriptor.model ?? "?")}

@@ -725,11 +725,11 @@ console.log(`smoke against ${BASE}`);
 {
   const EDIT_POOL = `smoke-override-${run}`;
   const patch = await json("PATCH", `/api/devices/${DEVICE}`, {
-    nickname: "shelf top left", notes: "USB hub port 3", pools: [EDIT_POOL],
+    name: "shelf top left", notes: "USB hub port 3", pools: [EDIT_POOL],
   });
   check("device edit accepted", patch.status === 200, JSON.stringify(patch.body));
   const dev = await json("GET", `/api/devices/${DEVICE}`);
-  check("nickname and notes persist", dev.body?.nickname === "shelf top left" && dev.body?.notes === "USB hub port 3");
+  check("name and notes persist", dev.body?.name === "shelf top left" && dev.body?.notes === "USB hub port 3");
   check("effective pools use the override", JSON.stringify(dev.body?.pools) === JSON.stringify([EDIT_POOL]), JSON.stringify(dev.body?.pools));
   check("the runner's own pools remain visible", (dev.body?.pools_reported ?? []).includes("ml-capable"), JSON.stringify(dev.body?.pools_reported));
 
@@ -741,7 +741,7 @@ console.log(`smoke against ${BASE}`);
   });
   const after = await json("GET", `/api/devices/${DEVICE}`);
   check("re-registration does not clobber the override", JSON.stringify(after.body?.pools) === JSON.stringify([EDIT_POOL]), JSON.stringify(after.body?.pools));
-  check("re-registration does not clobber the nickname", after.body?.nickname === "shelf top left");
+  check("re-registration does not clobber the name", after.body?.name === "shelf top left");
 
   // And the queue must honour the override, not the reported pools.
   const OVERRIDE_JOB = `smoke-override-job-${run}`;

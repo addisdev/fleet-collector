@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS devices (
   -- the device says what it thinks it is, the operator overrides, and neither
   -- erases the other. Effective pools = override ?? reported.
   pools_override TEXT,
-  nickname       TEXT,
+  -- The device's name. Not a nickname beside its id: the id is what the runner
+  -- reports and what job specs pin, and this is what a person calls the thing.
+  name           TEXT,
   notes          TEXT
 );
 
@@ -182,12 +184,25 @@ for (const [column, ddl] of [
   if (!jobColumns.has(column)) db.exec(`ALTER TABLE jobs ADD COLUMN ${ddl}`);
 }
 
+// `nickname` was the wrong word: it implied a second label beside the id rather
+// than the device's name. Renamed in place so existing names carry over — this
+// must happen before the add-column loop below, or that loop would add an empty
+// `name` beside the populated `nickname` and orphan every name already set.
+{
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(devices)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (cols.has("nickname") && !cols.has("name")) {
+    db.exec("ALTER TABLE devices RENAME COLUMN nickname TO name");
+  }
+}
+
 const deviceColumns = new Set(
   (db.prepare("PRAGMA table_info(devices)").all() as { name: string }[]).map((c) => c.name),
 );
 for (const [column, ddl] of [
   ["pools_override", "pools_override TEXT"],
-  ["nickname", "nickname TEXT"],
+  ["name", "name TEXT"],
   ["notes", "notes TEXT"],
 ] as const) {
   if (!deviceColumns.has(column)) db.exec(`ALTER TABLE devices ADD COLUMN ${ddl}`);

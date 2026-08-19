@@ -30,7 +30,7 @@ Written 2026-08-18.*
 >
 > **D2 adds control:** a job composer with a live "N devices match" preview that
 > uses the same matcher fan-out uses, cancel / retry / priority, saved job
-> templates, and device nickname / notes / pool editing. Cancelling is its own
+> templates, and device name / notes / pool editing. Cancelling is its own
 > status, never `failed` — a person stopping a job is not a breakage, and the
 > failure counts and alerts depend on that distinction. Pool edits live in a
 > separate `pools_override` column because the runner rewrites `pools` on every
@@ -93,7 +93,7 @@ The "is the fleet OK" page. Fits on one phone screen.
 - **Collector health:** uptime, sweep last ran, DB size, artifact store size, log file size (the README warns launchd doesn't rotate it), CI armed/unarmed badge.
 
 ### 3.2 Devices (`/dash/devices`, `/dash/devices/:id`)
-- Table/grid with filter by platform, OS, pool, status; sort by last seen, battery, thermal. Columns: nickname/ID, model · SoC · RAM, OS, pools, battery + charging icon, thermal, current job, lock holder, last seen.
+- Table/grid with filter by platform, OS, pool, status; sort by last seen, battery, thermal. Columns: name, model · SoC · RAM, OS, pools, battery + charging icon, thermal, current job, lock holder, last seen.
 - **Detail page:** full descriptor JSON, pools (editable), free-text notes ("USB hub port 3", "screen cracked"), 24 h battery + thermal chart from `beacon_samples`, job history for this device, latest benchmark numbers, actions: **run job on this device** (opens composer pinned to it), **release lock**, **power on/off** (its pool's webhook), **forget device** (delete registry row).
 - Cross-platform care: memory always shown with `mem_method`; iOS simulators flagged so they are never mistaken for hardware.
 
@@ -146,7 +146,7 @@ New or extended endpoints, all JSON:
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/overview` | Everything the Overview page needs in one call |
-| `GET /api/devices`, `GET /api/devices/:id`, `PATCH /api/devices/:id`, `DELETE /api/devices/:id` | List/detail/edit pools+nickname+notes/forget |
+| `GET /api/devices`, `GET /api/devices/:id`, `PATCH /api/devices/:id`, `DELETE /api/devices/:id` | List/detail/edit pools+name+notes/forget |
 | `GET /api/devices/:id/beacons?since=` | Beacon history for charts |
 | `GET /api/jobs?status=&workload=&executor=&pool=&device=&q=&from=&to=&page=` | Filtered, paginated list |
 | `GET /api/jobs/:id` (extends existing) | Adds results, artifacts, children, attempts timeline |
@@ -162,7 +162,7 @@ New or extended endpoints, all JSON:
 
 Schema changes (all additive, following the existing `ALTER TABLE` pattern in `db.ts`):
 - `jobs`: `priority INTEGER DEFAULT 0` (claim order becomes priority DESC, created_at ASC), `parent_job_id TEXT` (fan-out children), `cancelled` added to the status CHECK, `template_id TEXT`.
-- `devices`: `nickname TEXT`, `notes TEXT`.
+- `devices`: `name TEXT`, `notes TEXT`.
 - `results`: index on `(device_id, created_at)`.
 - new `alerts` table, new `job_templates` table.
 

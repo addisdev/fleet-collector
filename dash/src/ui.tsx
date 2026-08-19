@@ -302,23 +302,23 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 }
 
 /**
- * A device, named if you have named it.
+ * A device, by name.
  *
- * Shows the nickname with the id kept underneath rather than replacing it —
- * the id is what appears in job specs, logs and `adb devices`, so hiding it
- * would make the dashboard harder to reconcile with everything else, not easier.
+ * One name, not a name and an id stacked together. The id is still what job
+ * specs pin and what `adb devices` prints, so it stays available on hover and
+ * on the device's own page — but a list of machines should read like a list of
+ * machines.
  */
 export function DeviceName({ id, names, link = true }: { id: string; names: Record<string, string>; link?: boolean }) {
-  const nick = names[id];
-  const body = nick ? (
-    <>
-      {nick}
-      <div class="faint mono devid">{id}</div>
-    </>
+  const named = names[id];
+  const body = named ? <span>{named}</span> : <code>{id}</code>;
+  return link ? (
+    <Link to={`/devices/${encodeURIComponent(id)}`} title={id}>
+      {body}
+    </Link>
   ) : (
-    <code>{id}</code>
+    <span title={id}>{body}</span>
   );
-  return link ? <Link to={`/devices/${encodeURIComponent(id)}`}>{body}</Link> : <span>{body}</span>;
 }
 
 export function CopyId({ text }: { text: string }) {

@@ -190,7 +190,7 @@ xcrun simctl launch booted com.taylab.fleetrunner -autostart 1`}
                     {arrived.map((id) => (
                       <p class="arrived" key={id}>
                         <strong>{id}</strong> registered —{" "}
-                        <Link to={`/devices/${encodeURIComponent(id)}`}>open it</Link> to give it a nickname, notes, or
+                        <Link to={`/devices/${encodeURIComponent(id)}`}>open it</Link> to give it a name, notes, or
                         a pool.
                       </p>
                     ))}

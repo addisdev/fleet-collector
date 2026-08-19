@@ -142,7 +142,7 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
   app.patch("/api/devices/:id", async (req, reply) => {
     if (!requireToken(req, reply)) return;
     const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { nickname?: string | null; notes?: string | null; pools?: string[] | null };
+    const body = (req.body ?? {}) as { name?: string | null; notes?: string | null; pools?: string[] | null };
 
     const exists = db.prepare("SELECT 1 FROM devices WHERE device_id = ?").get(id);
     if (!exists) return reply.code(404).send({ error: "unknown device" });
@@ -151,8 +151,8 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
       if (!Array.isArray(body.pools) || body.pools.some((p) => typeof p !== "string"))
         return reply.code(400).send({ error: "pools must be an array of strings, or null to clear the override" });
     }
-    if (body.nickname !== undefined)
-      db.prepare("UPDATE devices SET nickname = ? WHERE device_id = ?").run(body.nickname || null, id);
+    if (body.name !== undefined)
+      db.prepare("UPDATE devices SET name = ? WHERE device_id = ?").run(body.name || null, id);
     if (body.notes !== undefined)
       db.prepare("UPDATE devices SET notes = ? WHERE device_id = ?").run(body.notes || null, id);
     if (body.pools !== undefined)
@@ -164,7 +164,7 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
       );
 
     announce({ type: "device", device_id: id, event: "edit" });
-    const row = db.prepare("SELECT pools, pools_override, nickname, notes FROM devices WHERE device_id = ?").get(id);
+    const row = db.prepare("SELECT pools, pools_override, name, notes FROM devices WHERE device_id = ?").get(id);
     return { ok: true, device_id: id, ...(row as object) };
   });
 
@@ -172,7 +172,7 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
     if (!requireToken(req, reply)) return;
     const { id } = req.params as { id: string };
     // Forgetting a live device is pointless — it re-registers within a minute
-    // and the row comes back, minus the operator's nickname and notes.
+    // and the row comes back, minus the operator's name and notes.
     const claimed = db.prepare("SELECT job_id FROM jobs WHERE status = 'claimed' AND claimed_by = ?").get(id) as
       | { job_id: string }
       | undefined;
