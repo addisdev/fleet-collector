@@ -386,3 +386,30 @@ kbd {
   .actions { gap: 0.45rem; }
   .pager { justify-content: space-between; }
 }
+
+/* --- enrolment --- */
+
+.enroll { display: flex; gap: 1.4rem; flex-wrap: wrap; align-items: flex-start; }
+.enroll-qr { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; }
+/* The QR keeps its own white card in dark mode: a dark-background code is the
+   kind of thing that looks considered and then does not scan. */
+.qr { border-radius: 6px; background: #fff; padding: 6px; display: block; }
+.enroll-url { font-size: 0.78rem; color: var(--ink-dim); }
+.enroll-steps { flex: 1 1 20rem; min-width: 0; }
+
+pre.cmd {
+  background: var(--panel-2); border-radius: 6px; padding: 0.7rem 0.85rem; overflow-x: auto;
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; margin: 0.5rem 0 0.9rem;
+  white-space: pre; color: var(--ink);
+}
+
+.waiting { display: flex; align-items: center; gap: 0.6rem; color: var(--ink-dim); font-size: 0.86rem; }
+.spinner {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--warn);
+  animation: pulse 1.2s ease-in-out infinite; flex: none;
+}
+.arrived {
+  color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: 6px; padding: 0.55rem 0.8rem; font-size: 0.86rem; margin: 0.4rem 0;
+}

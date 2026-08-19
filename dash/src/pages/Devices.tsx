@@ -48,7 +48,12 @@ export function Devices() {
 
   return (
     <>
-      <h1>Devices</h1>
+      <h1>
+        Devices{" "}
+        <Link to="/devices/new" class="newjob">
+          + add a device
+        </Link>
+      </h1>
       <Loaded state={state} what="devices">
         {(d) => (
           <>

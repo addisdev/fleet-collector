@@ -956,6 +956,46 @@ console.log(`smoke against ${BASE}`);
   check("acking an unknown alert 404s", (await json("POST", "/api/alerts/999999/ack", {})).status === 404);
 }
 
+// 32. enrolment (adding a device to the fleet)
+{
+  const enroll = await json("GET", "/api/enroll");
+  check("enroll endpoint answers", enroll.status === 200, JSON.stringify(enroll.body).slice(0, 120));
+  // The QR has to encode an address a phone can reach. Loopback is a perfectly
+  // good URL for the operator and a useless one for a device, so the endpoint
+  // reports the host's own non-loopback interfaces rather than echoing back
+  // whatever the browser happened to connect on.
+  const bases = (enroll.body?.bases ?? []) as { url: string; kind: string }[];
+  check("enrol advertises at least one reachable address", bases.length >= 1, JSON.stringify(bases));
+  check("no loopback address is ever advertised", !bases.some((b) => /127\.|localhost|::1/.test(b.url)), JSON.stringify(bases));
+  check("addresses are classified lan or tailnet", bases.every((b) => b.kind === "lan" || b.kind === "tailnet"), JSON.stringify(bases));
+  check("enrol lists already-known devices", Array.isArray(enroll.body?.known_device_ids) && enroll.body.known_device_ids.includes(DEVICE));
+
+  // A phone downloading the runner must get a file Android will offer to
+  // install, not a 64-character hash with no extension.
+  const apkSha = createHash("sha256").update(`fake-apk-${run}`).digest("hex");
+  await fetch(`${BASE}/artifacts`, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream", "x-artifact-name": `fleet-runner-${run}.apk` },
+    body: Buffer.from(`fake-apk-${run}`),
+  });
+  const enroll2 = await json("GET", "/api/enroll");
+  check("enrol offers the newest runner APK", (enroll2.body?.runner_apk?.name ?? "").endsWith(".apk"), JSON.stringify(enroll2.body?.runner_apk));
+  check("the APK link carries a filename", String(enroll2.body?.runner_apk?.download ?? "").includes("filename="));
+
+  const named = await fetch(`${BASE}/artifacts/${apkSha}?filename=fleet-runner.apk`);
+  check("filename becomes a content-disposition", (named.headers.get("content-disposition") ?? "").includes('filename="fleet-runner.apk"'), named.headers.get("content-disposition") ?? "none");
+  const bare = await fetch(`${BASE}/artifacts/${apkSha}`);
+  check("no filename means no content-disposition", !bare.headers.get("content-disposition"));
+
+  // The name goes straight into a response header, so it is stripped rather
+  // than trusted: a CRLF would let a caller invent headers of their own.
+  const evil = await fetch(`${BASE}/artifacts/${apkSha}?filename=${encodeURIComponent('a"\r\nX-Evil: yes')}`);
+  check("header injection through the filename is stripped", !evil.headers.get("x-evil"), "an injected header survived");
+  check("quotes and CRLF do not reach the header", (evil.headers.get("content-disposition") ?? "").includes('filename="aX-Evilyes"'), evil.headers.get("content-disposition") ?? "none");
+  const traversal = await fetch(`${BASE}/artifacts/${apkSha}?filename=${encodeURIComponent("../../etc/passwd")}`);
+  check("path separators are stripped from the filename", !(traversal.headers.get("content-disposition") ?? "").includes("/"), traversal.headers.get("content-disposition") ?? "none");
+}
+
 // 29. the legacy dashboard's own links still resolve to legacy pages
 {
   const html = await (await fetch(`${BASE}/dash/legacy`)).text();
