@@ -325,6 +325,33 @@ fleet must keep running whether or not anyone has a token. This is a speed bump,
 CI and curl, so anyone who can reach the collector can still enqueue. What the
 token buys is that a stray tab or misfired script cannot *cancel* or *delete*.
 
+## The host executor on fleet-host
+
+Host-driven workloads — `install`, `ui-test`, `drain`, `soak` — cannot run inside
+an app: they drive a device from *outside*, over adb. So the executor has to live
+wherever the devices are physically plugged in, and since fleet-host is the
+always-on machine, that is there.
+
+[`deploy/com.addisdev.fleet-executor.fleet-host.plist`](deploy/com.addisdev.fleet-executor.fleet-host.plist)
+runs it under launchd beside the collector, talking to it over loopback so it
+does not depend on the LAN address. Everything it needs is user-local, keeping
+fleet-host sudo-free and rebuildable over SSH:
+
+| | |
+|---|---|
+| `~/.local/platform-tools/adb` | Android Debug Bridge 1.0.41, from Google's zip |
+| `~/.local/jdk` | Temurin 17, needed only because Maestro is JVM-based |
+| `~/.maestro/bin/maestro` | Maestro 2.8 |
+
+**iOS host-driven work is not possible on fleet-host, by design.** `simctl` and
+`devicectl` ship with full Xcode, which that machine deliberately does not have —
+its `xcrun` is the Command Line Tools stub and cannot find `simctl`. iOS UI tests
+run from a Mac that has Xcode. Android host work runs on fleet-host.
+
+Devices must be **physically attached to fleet-host** for it to drive them. With
+nothing attached, a host job is claimed and fails cleanly with
+`no android targets attached`, which is the correct answer rather than a hang.
+
 ## Schedules and targeting
 
 The nightly and weekly runs live in [`scripts/seed-schedules.ts`](scripts/seed-schedules.ts),
