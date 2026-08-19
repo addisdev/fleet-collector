@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.addisdev.fleet-executor</string>
+
+  <!-- The host executor, on the same machine as the collector. Host-driven
+       workloads (install, ui-test, drain, soak) are the ones that cannot run
+       inside an app: they drive a device from outside over adb, so the executor
+       has to live wherever the devices are physically plugged in.
+
+       Everything it needs is user-local, the same way node is, so fleet-host
+       stays sudo-free and rebuildable over SSH:
+         ~/.local/platform-tools/adb   Android Debug Bridge
+         ~/.local/jdk                  Temurin 17, only because Maestro is JVM
+         ~/.maestro/bin/maestro        Maestro 2.8
+
+       iOS host-driven work is NOT possible here and is not meant to be: simctl
+       and devicectl ship with full Xcode, which this machine deliberately does
+       not have. iOS UI tests run from a Mac that does. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/elsie/.local/node/bin/node</string>
+    <string>/Users/elsie/fleet-collector/node_modules/tsx/dist/cli.mjs</string>
+    <string>src/executor.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/elsie/fleet-collector</string>
+
+  <!-- The executor long-polls the collector; if it dies, host jobs simply stop
+       being claimed and the queue looks slow rather than broken. KeepAlive, and
+       the dashboard's executor panel, are what make that visible. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/elsie/.local/jdk/Contents/Home/bin:/Users/elsie/.local/platform-tools:/Users/elsie/.local/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Same machine as the collector, so loopback: no dependency on the LAN
+         address, and it keeps working if the host's IP ever changes. -->
+    <key>FLEET_URL</key>
+    <string>http://127.0.0.1:8788</string>
+    <key>FLEET_EXECUTOR_NAME</key>
+    <string>fleet-host</string>
+    <key>ADB_BIN</key>
+    <string>/Users/elsie/.local/platform-tools/adb</string>
+    <key>MAESTRO_BIN</key>
+    <string>/Users/elsie/.maestro/bin/maestro</string>
+    <key>JAVA_HOME</key>
+    <string>/Users/elsie/.local/jdk/Contents/Home</string>
+    <key>FLEET_FLOWS_DIR</key>
+    <string>/Users/elsie/fleet-collector/flows</string>
+    <!-- Maestro phones home unless told not to. -->
+    <key>MAESTRO_CLI_NO_ANALYTICS</key>
+    <string>1</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/elsie/Library/Logs/fleet-executor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/elsie/Library/Logs/fleet-executor.log</string>
+</dict>
+</plist>
