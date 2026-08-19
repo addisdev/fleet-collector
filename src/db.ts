@@ -1,8 +1,8 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { DATA_DIR } from "./config.js";
 
-const DATA_DIR = process.env.FLEET_DATA_DIR ?? path.resolve("data");
 mkdirSync(DATA_DIR, { recursive: true });
 
 export const db = new Database(path.join(DATA_DIR, "fleet.db"));
@@ -12,9 +12,16 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS devices (
   device_id   TEXT PRIMARY KEY,
   descriptor  TEXT NOT NULL,          -- JSON: model, soc, ram_mb, os, app_ver
-  pools       TEXT NOT NULL,          -- JSON array of pool tags
+  pools       TEXT NOT NULL,          -- JSON array: what the runner reports
   last_seen   TEXT NOT NULL,
-  last_beacon TEXT                    -- JSON: most recent beacon sample
+  last_beacon TEXT,                   -- JSON: most recent beacon sample
+  -- Operator-set fields. The runner rewrites the pools column on every
+  -- register, so an edit sharing it would be clobbered within the minute:
+  -- the device says what it thinks it is, the operator overrides, and neither
+  -- erases the other. Effective pools = override ?? reported.
+  pools_override TEXT,
+  nickname       TEXT,
+  notes          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -22,8 +29,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   executor    TEXT NOT NULL CHECK (executor IN ('device','host')),
   workload    TEXT NOT NULL,
   spec        TEXT NOT NULL,          -- full JSON job spec
+  -- 'cancelled' is not 'failed': a failed job means something went wrong, a
+  -- cancelled one means a person stopped it. Collapsing them would lie in the
+  -- dashboard's failure counts and in every alert built on them.
   status      TEXT NOT NULL DEFAULT 'queued'
-              CHECK (status IN ('queued','claimed','done','failed')),
+              CHECK (status IN ('queued','claimed','done','failed','cancelled')),
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   claimed_by  TEXT,
   claimed_at  TEXT,
@@ -35,7 +45,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   max_attempts   INTEGER NOT NULL DEFAULT 3,
   attempts       INTEGER NOT NULL DEFAULT 0,
   lease_deadline TEXT,
-  last_error     TEXT
+  last_error     TEXT,
+  -- Claim order is priority DESC, created_at ASC: a job promoted from the
+  -- dashboard jumps the queue without its created_at being falsified.
+  priority       INTEGER NOT NULL DEFAULT 0,
+  -- Recorded at fan-out time. The parent id has no row of its own, so without
+  -- this the relationship can only be inferred from the id string.
+  parent_job_id  TEXT,
+  template_id    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -94,6 +111,17 @@ CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events (topic, id);
 -- closes. posted=0 rows are dry runs: reporting is off (the default) or the
 -- POST failed — the audit trail exists either way, so turning CI on later
 -- changes behavior, not bookkeeping.
+-- Saved job specs for the dashboard composer: the "run the nightly benchmark
+-- again, now" button without retyping a spec. A template is a job spec with no
+-- job_id, exactly like a schedule's template.
+CREATE TABLE IF NOT EXISTS job_templates (
+  id         TEXT PRIMARY KEY,
+  name       TEXT,
+  spec       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS status_reports (
   job_id     TEXT NOT NULL,
   target     TEXT NOT NULL,            -- owner/repo@sha
@@ -116,13 +144,78 @@ for (const [column, ddl] of [
   ["attempts", "attempts INTEGER NOT NULL DEFAULT 0"],
   ["lease_deadline", "lease_deadline TEXT"],
   ["last_error", "last_error TEXT"],
+  ["priority", "priority INTEGER NOT NULL DEFAULT 0"],
+  ["parent_job_id", "parent_job_id TEXT"],
+  ["template_id", "template_id TEXT"],
 ] as const) {
   if (!jobColumns.has(column)) db.exec(`ALTER TABLE jobs ADD COLUMN ${ddl}`);
 }
 
-// After the ALTERs: on a pre-lease database the column does not exist yet when
-// the CREATE TABLE block above runs.
-db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs (status, lease_deadline);");
+const deviceColumns = new Set(
+  (db.prepare("PRAGMA table_info(devices)").all() as { name: string }[]).map((c) => c.name),
+);
+for (const [column, ddl] of [
+  ["pools_override", "pools_override TEXT"],
+  ["nickname", "nickname TEXT"],
+  ["notes", "notes TEXT"],
+] as const) {
+  if (!deviceColumns.has(column)) db.exec(`ALTER TABLE devices ADD COLUMN ${ddl}`);
+}
+
+// A CHECK constraint cannot be widened with ALTER, so a database created before
+// 'cancelled' existed would reject every cancellation with a constraint error.
+// SQLite's supported fix is to rebuild the table. Every column above exists by
+// now, so the copy can name them explicitly rather than trusting SELECT *.
+const jobsDdl = (
+  db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'").get() as
+    | { sql: string }
+    | undefined
+)?.sql;
+if (jobsDdl && !jobsDdl.includes("'cancelled'")) {
+  const COLUMNS = [
+    "job_id", "executor", "workload", "spec", "status", "created_at", "claimed_by", "claimed_at",
+    "finished_at", "lease_ttl_s", "max_attempts", "attempts", "lease_deadline", "last_error",
+    "priority", "parent_job_id", "template_id",
+  ].join(", ");
+  db.exec("PRAGMA foreign_keys = off");
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE jobs_migrating (
+        job_id      TEXT PRIMARY KEY,
+        executor    TEXT NOT NULL CHECK (executor IN ('device','host')),
+        workload    TEXT NOT NULL,
+        spec        TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued','claimed','done','failed','cancelled')),
+        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        claimed_by  TEXT,
+        claimed_at  TEXT,
+        finished_at TEXT,
+        lease_ttl_s    INTEGER NOT NULL DEFAULT 600,
+        max_attempts   INTEGER NOT NULL DEFAULT 3,
+        attempts       INTEGER NOT NULL DEFAULT 0,
+        lease_deadline TEXT,
+        last_error     TEXT,
+        priority       INTEGER NOT NULL DEFAULT 0,
+        parent_job_id  TEXT,
+        template_id    TEXT
+      );
+      INSERT INTO jobs_migrating (${COLUMNS}) SELECT ${COLUMNS} FROM jobs;
+      DROP TABLE jobs;
+      ALTER TABLE jobs_migrating RENAME TO jobs;
+    `);
+  })();
+  db.exec("PRAGMA foreign_keys = on");
+}
+
+// After the ALTERs and the rebuild: on a pre-lease database the column does not
+// exist yet when the CREATE TABLE block above runs, and DROP TABLE takes every
+// index on the old table with it.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs (status, lease_deadline);
+  CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (status, executor, priority DESC, created_at);
+  CREATE INDEX IF NOT EXISTS idx_jobs_parent ON jobs (parent_job_id);
+`);
 
 // Jobs claimed before leases existed have no deadline and would never be swept.
 // Treat them as claimed right now: they get one lease window to report in.

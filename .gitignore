@@ -4,3 +4,4 @@ artifacts/store/
 *.log
 .DS_Store
 power.json
+dash/dist/

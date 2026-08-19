@@ -9,10 +9,29 @@ import { db } from "./db.js";
 import { renderDash, renderBench } from "./dash.js";
 import { cronMatches, isValidCron, minuteKey } from "./cron.js";
 import { evalMatch, isValidMatch } from "./match.js";
+import {
+  ARTIFACT_DIR,
+  GITHUB_API,
+  GITHUB_STATUS_ARMED,
+  GITHUB_TOKEN,
+  PORT,
+  POWER_CONFIG_PATH,
+  SCHEDULER_TICK_MS,
+  SWEEP_MS,
+} from "./config.js";
+import { invalidateOverview, publish, registerApi } from "./api/index.js";
+import { effectivePools } from "./api/shared.js";
+import { registerDashStatic } from "./dash-static.js";
 
-const PORT = Number(process.env.FLEET_PORT ?? 8788);
-const ARTIFACT_DIR = process.env.FLEET_ARTIFACT_DIR ?? path.resolve("artifacts/store");
 mkdirSync(ARTIFACT_DIR, { recursive: true });
+
+/** Every fleet-state change fans out to connected dashboards and drops the
+ *  overview's short cache. Called after the write commits, never inside a
+ *  transaction — a broken browser pipe must not roll back a device's result. */
+function announce(event: { type: string; [k: string]: unknown }) {
+  invalidateOverview();
+  publish(event);
+}
 
 const LONG_POLL_S = 25;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -26,7 +45,6 @@ const LONG_LEASE_TTL_S = 4 * 60 * 60;
 const LONG_LEASE_WORKLOADS = new Set(["drain", "soak"]);
 const MAX_LEASE_TTL_S = 24 * 60 * 60;
 const DEFAULT_MAX_ATTEMPTS = 3;
-const SWEEP_MS = Number(process.env.FLEET_SWEEP_MS ?? 15_000);
 
 const app = Fastify({ logger: { level: process.env.FLEET_LOG ?? "info" } });
 
@@ -42,23 +60,42 @@ type JobSpec = {
   fanout?: boolean;
   targets?: { pool?: string; match?: string; exclusive?: boolean; device_id?: string };
   lease?: { ttl_s?: number; max_attempts?: number };
+  // Queue position and provenance. Both are collector bookkeeping rather than
+  // instructions to the runner, which ignores them.
+  priority?: number;
+  template_id?: string;
   [k: string]: unknown;
 };
-
-const SCHEDULER_TICK_MS = Number(process.env.FLEET_SCHEDULER_TICK_MS ?? 20_000);
-const POWER_CONFIG_PATH = process.env.FLEET_POWER_CONFIG ?? path.resolve("power.json");
-
-// CI integration is BUILT BUT OFF. Statuses are recorded (posted=0) unless
-// both are set: FLEET_GITHUB_STATUS=1 arms posting, FLEET_GITHUB_TOKEN
-// authenticates it. Nothing else in the system reads these.
-const GITHUB_STATUS_ARMED = process.env.FLEET_GITHUB_STATUS === "1";
-const GITHUB_TOKEN = process.env.FLEET_GITHUB_TOKEN;
-const GITHUB_API = process.env.FLEET_GITHUB_API ?? "https://api.github.com";
 
 const WORKLOADS = new Set(["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak"]);
 
 function touchDevice(deviceId: string) {
   db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE device_id = ?").run(deviceId);
+}
+
+/** Devices a `targets` clause selects. Shared by fan-out and by the composer's
+ *  "N devices match" preview, so the preview cannot disagree with what fan-out
+ *  will actually do. */
+export function matchingDevices(pool?: string, match?: string) {
+  return (
+    db.prepare("SELECT device_id, pools, pools_override, descriptor FROM devices").all() as {
+      device_id: string;
+      pools: string;
+      pools_override: string | null;
+      descriptor: string;
+    }[]
+  ).filter((d) => {
+    const pools = effectivePools(d);
+    if (pool && !pools.includes(pool)) return false;
+    if (match) {
+      try {
+        return evalMatch(match, { ...JSON.parse(d.descriptor), device_id: d.device_id, pools });
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  });
 }
 
 // Atomically claim the oldest queued job this claimant is eligible for, and
@@ -72,10 +109,16 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
     if (locked) return null;
     const dev = db.prepare("SELECT descriptor FROM devices WHERE device_id = ?").get(claimant) as
       | { descriptor: string } | undefined;
+    // targets.match expressions can read `pools`, so they see the effective set
+    // the caller resolved, not the runner's raw report.
     descriptor = { ...(dev ? JSON.parse(dev.descriptor) : {}), device_id: claimant, pools: devicePools };
   }
+  // Priority first, then age. A job promoted from the dashboard jumps the queue
+  // without anyone falsifying its created_at.
   const rows = db
-    .prepare("SELECT job_id, spec FROM jobs WHERE status = 'queued' AND executor = ? ORDER BY created_at")
+    .prepare(
+      "SELECT job_id, spec FROM jobs WHERE status = 'queued' AND executor = ? ORDER BY priority DESC, created_at",
+    )
     .all(executor) as { job_id: string; spec: string }[];
   for (const row of rows) {
     const spec = JSON.parse(row.spec) as JobSpec;
@@ -107,7 +150,12 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
 async function longPollClaim(executor: "device" | "host", claimant: string, pools: string[]) {
   for (let i = 0; i < LONG_POLL_S; i++) {
     const spec = claimTx(executor, claimant, pools);
-    if (spec) return spec;
+    if (spec) {
+      // Announced here rather than inside claimTx: the transaction has
+      // committed by the time it returns.
+      announce({ type: "job", job_id: spec.job_id, status: "claimed", workload: spec.workload, executor, claimed_by: claimant });
+      return spec;
+    }
     await sleep(1000);
   }
   return null;
@@ -156,10 +204,14 @@ const sweepLeasesTx = db.transaction((): { requeued: SweptJob[]; failed: SweptJo
 
 function sweepLeases() {
   const swept = sweepLeasesTx();
-  for (const j of swept.requeued)
+  for (const j of swept.requeued) {
     app.log.warn({ job_id: j.job_id, claimed_by: j.claimed_by, attempt: j.attempts }, "lease expired; requeued");
-  for (const j of swept.failed)
+    announce({ type: "job", job_id: j.job_id, status: "queued", reason: "lease expired", attempts: j.attempts });
+  }
+  for (const j of swept.failed) {
     app.log.error({ job_id: j.job_id, claimed_by: j.claimed_by, attempts: j.attempts }, "lease expired; job failed");
+    announce({ type: "job", job_id: j.job_id, status: "failed", reason: "lease expired", attempts: j.attempts });
+  }
   return swept;
 }
 
@@ -174,6 +226,7 @@ app.post("/devices/register", async (req, reply) => {
      ON CONFLICT(device_id) DO UPDATE SET
        descriptor = excluded.descriptor, pools = excluded.pools, last_seen = excluded.last_seen`,
   ).run(b.device_id, JSON.stringify(b.descriptor ?? {}), JSON.stringify(b.pools ?? []));
+  announce({ type: "device", device_id: b.device_id, event: "register", pools: b.pools ?? [] });
   return { ok: true };
 });
 
@@ -190,12 +243,12 @@ app.get("/devices", async () =>
 
 app.get("/devices/:id/next-job", async (req, reply) => {
   const { id } = req.params as { id: string };
-  const dev = db.prepare("SELECT pools FROM devices WHERE device_id = ?").get(id) as
-    | { pools: string }
+  const dev = db.prepare("SELECT pools, pools_override FROM devices WHERE device_id = ?").get(id) as
+    | { pools: string; pools_override: string | null }
     | undefined;
   if (!dev) return reply.code(404).send({ error: "unknown device; register first" });
   touchDevice(id);
-  const spec = await longPollClaim("device", id, JSON.parse(dev.pools));
+  const spec = await longPollClaim("device", id, effectivePools(dev));
   if (!spec) return reply.code(204).send();
   return spec;
 });
@@ -231,6 +284,10 @@ app.post("/jobs", async (req, reply) => {
   // can pace their beacons against it.
   spec.lease = { ttl_s: ttlS, max_attempts: maxAttempts };
 
+  const priority = spec.priority ?? 0;
+  if (!Number.isInteger(priority)) return reply.code(400).send({ error: "priority must be an integer" });
+  const templateId = typeof spec.template_id === "string" ? spec.template_id : null;
+
   // Fan-out: one queued child per registered device in the target pool, each
   // pinned via targets.device_id. Host jobs already fan across attached
   // targets inside the executor, so fanout is a device-executor concept.
@@ -242,23 +299,13 @@ app.post("/jobs", async (req, reply) => {
       return reply.code(400).send({ error: "fanout is only for executor: device" });
     const pool = spec.targets?.pool;
     const match = spec.targets?.match;
-    const devices = (
-      db.prepare("SELECT device_id, pools, descriptor FROM devices").all() as
-        { device_id: string; pools: string; descriptor: string }[]
-    ).filter((d) => {
-      const pools = JSON.parse(d.pools) as string[];
-      if (pool && !pools.includes(pool)) return false;
-      if (match) {
-        try { return evalMatch(match, { ...JSON.parse(d.descriptor), device_id: d.device_id, pools }); }
-        catch { return false; }
-      }
-      return true;
-    });
+    const devices = matchingDevices(pool, match);
     if (devices.length === 0)
       return reply.code(400).send({ error: `no registered devices${pool ? ` in pool ${pool}` : ""}${match ? ` matching ${match}` : ""}` });
 
     const insert = db.prepare(
-      "INSERT OR IGNORE INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts) VALUES (?, ?, ?, ?, ?, ?)",
+      `INSERT OR IGNORE INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts, priority, parent_job_id, template_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const created: string[] = [];
     for (const d of devices) {
@@ -268,21 +315,28 @@ app.post("/jobs", async (req, reply) => {
         targets: { ...spec.targets, device_id: d.device_id },
       };
       delete child.fanout;
-      const r = insert.run(child.job_id, child.executor, child.workload, JSON.stringify(child), ttlS, maxAttempts);
+      const r = insert.run(
+        child.job_id, child.executor, child.workload, JSON.stringify(child), ttlS, maxAttempts,
+        priority, spec.job_id, templateId,
+      );
       if (r.changes > 0) created.push(child.job_id);
     }
+    for (const jobId of created)
+      announce({ type: "job", job_id: jobId, status: "queued", workload: spec.workload, executor: spec.executor, parent: spec.job_id });
     return reply.code(201).send({ ok: true, fanout: created });
   }
 
   try {
     db.prepare(
-      "INSERT INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(spec.job_id, spec.executor, spec.workload, JSON.stringify(spec), ttlS, maxAttempts);
+      `INSERT INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts, priority, template_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(spec.job_id, spec.executor, spec.workload, JSON.stringify(spec), ttlS, maxAttempts, priority, templateId);
   } catch (e: unknown) {
     if ((e as { code?: string }).code === "SQLITE_CONSTRAINT_PRIMARYKEY")
       return reply.code(409).send({ error: "job_id already exists" });
     throw e;
   }
+  announce({ type: "job", job_id: spec.job_id, status: "queued", workload: spec.workload, executor: spec.executor });
   return reply.code(201).send({ ok: true, job_id: spec.job_id });
 });
 
@@ -336,6 +390,13 @@ app.post("/results", async (req, reply) => {
           )
           .run(b.job_id).changes > 0;
     }
+    announce({
+      type: "beacon",
+      device_id: b.device_id,
+      job_id: b.job_id ?? null,
+      lease_renewed: leaseRenewed,
+      beacon: (b as { beacon?: unknown }).beacon ?? null,
+    });
     return { ok: true, lease_renewed: leaseRenewed };
   }
 
@@ -346,6 +407,7 @@ app.post("/results", async (req, reply) => {
     "INSERT OR REPLACE INTO results (job_id, device_id, iter, payload) VALUES (?, ?, ?, ?)",
   ).run(b.job_id, b.device_id, b.iter ?? 0, JSON.stringify(b));
   touchDevice(b.device_id);
+  announce({ type: "result", job_id: b.job_id, device_id: b.device_id, iter: b.iter ?? 0, final: !!b.final });
 
   if (b.final) {
     // Dropping the deadline takes the job out of the sweep's reach for good.
@@ -353,6 +415,12 @@ app.post("/results", async (req, reply) => {
       "UPDATE jobs SET status = ?, finished_at = datetime('now'), lease_deadline = NULL WHERE job_id = ?",
     ).run(b.ok === false ? "failed" : "done", b.job_id);
     db.prepare("DELETE FROM device_locks WHERE job_id = ?").run(b.job_id);
+    announce({
+      type: "job",
+      job_id: b.job_id,
+      status: b.ok === false ? "failed" : "done",
+      device_id: b.device_id,
+    });
     reportStatus(b.job_id, b.ok === false ? "failure" : "success").catch((e) =>
       app.log.error(e, "status report failed"),
     );
@@ -430,13 +498,16 @@ app.post("/locks/acquire", async (req, reply) => {
   const b = req.body as { job_id?: string; device_ids?: string[] };
   if (!b?.job_id || !Array.isArray(b.device_ids))
     return reply.code(400).send({ error: "job_id and device_ids required" });
-  return { ok: true, ...acquireLocksTx(b.job_id, b.device_ids) };
+  const outcome = acquireLocksTx(b.job_id, b.device_ids);
+  if (outcome.granted.length) announce({ type: "lock", event: "acquire", job_id: b.job_id, devices: outcome.granted });
+  return { ok: true, ...outcome };
 });
 
 app.post("/locks/release", async (req, reply) => {
   const b = req.body as { job_id?: string };
   if (!b?.job_id) return reply.code(400).send({ error: "job_id required" });
   const released = db.prepare("DELETE FROM device_locks WHERE job_id = ?").run(b.job_id).changes;
+  if (released) announce({ type: "lock", event: "release", job_id: b.job_id, released });
   return { ok: true, released };
 });
 
@@ -448,6 +519,7 @@ app.post("/events/:topic", async (req, reply) => {
   const r = db.prepare("INSERT INTO events (topic, payload) VALUES (?, ?)").run(
     topic, JSON.stringify(payload),
   );
+  announce({ type: "pipeline-event", topic, id: Number(r.lastInsertRowid) });
   return reply.code(201).send({ ok: true, id: Number(r.lastInsertRowid) });
 });
 
@@ -480,6 +552,7 @@ app.post("/schedules", async (req, reply) => {
     `INSERT INTO schedules (id, cron, template, enabled) VALUES (?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET cron = excluded.cron, template = excluded.template, enabled = excluded.enabled`,
   ).run(b.id, b.cron, JSON.stringify(b.template), b.enabled ? 1 : 0);
+  announce({ type: "schedule", event: "upsert", id: b.id, enabled: !!b.enabled });
   return reply.code(201).send({ ok: true, id: b.id, enabled: !!b.enabled });
 });
 
@@ -494,6 +567,7 @@ app.patch("/schedules/:id", async (req, reply) => {
   if (typeof b?.enabled !== "boolean") return reply.code(400).send({ error: "enabled (boolean) required" });
   const changed = db.prepare("UPDATE schedules SET enabled = ? WHERE id = ?").run(b.enabled ? 1 : 0, id).changes;
   if (!changed) return reply.code(404).send({ error: "not found" });
+  announce({ type: "schedule", event: "toggle", id, enabled: b.enabled });
   return { ok: true, id, enabled: b.enabled };
 });
 
@@ -501,6 +575,7 @@ app.delete("/schedules/:id", async (req, reply) => {
   const { id } = req.params as { id: string };
   const changed = db.prepare("DELETE FROM schedules WHERE id = ?").run(id).changes;
   if (!changed) return reply.code(404).send({ error: "not found" });
+  announce({ type: "schedule", event: "delete", id });
   return { ok: true };
 });
 
@@ -586,6 +661,7 @@ app.post("/artifacts", async (req, reply) => {
   db.prepare(
     "INSERT OR IGNORE INTO artifacts (sha256, name, size) VALUES (?, ?, ?)",
   ).run(sha256, name, size);
+  announce({ type: "artifact", sha256, name, size });
   return reply.code(201).send({ ok: true, sha256, size });
 });
 
@@ -614,12 +690,22 @@ app.get("/artifacts/:sha256", async (req, reply) => {
 
 // --- dashboard ---
 
-app.get("/dash", async (_req, reply) => {
+// The server-rendered tables that were /dash through Phase 0–4. Kept at
+// /dash/legacy while the SPA grows into parity (plan D0→D1): it has no build
+// step, so it still works from a bare checkout if the bundle is missing.
+app.get("/dash/legacy", async (_req, reply) => {
   reply.type("text/html").send(renderDash());
 });
-app.get("/dash/bench", async (_req, reply) => {
+app.get("/dash/legacy/bench", async (_req, reply) => {
   reply.type("text/html").send(renderBench());
 });
+
+// Read API for the dashboard, then the SPA itself. Registration order does not
+// decide precedence — Fastify prefers static routes over the /dash/* wildcard —
+// but reading them in this order matches how a request resolves.
+registerApi(app, announce, matchingDevices);
+registerDashStatic(app);
+
 app.get("/", async (_req, reply) => reply.redirect("/dash"));
 
 app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
