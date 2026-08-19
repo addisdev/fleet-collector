@@ -5,6 +5,7 @@ import { Link, Panel } from "./ui.js";
 import { Compose } from "./pages/Compose.js";
 import { DeviceDetail } from "./pages/DeviceDetail.js";
 import { Devices } from "./pages/Devices.js";
+import { Enroll } from "./pages/Enroll.js";
 import { JobDetail } from "./pages/JobDetail.js";
 import { Jobs } from "./pages/Jobs.js";
 import { Overview } from "./pages/Overview.js";
@@ -71,6 +72,8 @@ function Router() {
   if (match("/system", route)) return <System />;
   if (match("/alerts", route)) return <Alerts />;
   if (match("/devices", route)) return <Devices />;
+  // Before /devices/:id, or "new" reads as a device id.
+  if (match("/devices/new", route)) return <Enroll />;
   if (match("/jobs", route)) return <Jobs />;
   // Before /jobs/:id, or "new" would be read as a job id.
   if (match("/jobs/new", route)) return <Compose />;

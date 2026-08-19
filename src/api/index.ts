@@ -9,6 +9,7 @@
 //     predict the shape
 import type { FastifyInstance } from "fastify";
 import { registerDevices } from "./devices.js";
+import { registerEnroll } from "./enroll.js";
 import { registerJobs } from "./jobs.js";
 import { registerMutations } from "./mutations.js";
 import { registerOverview } from "./overview.js";
@@ -25,6 +26,7 @@ type MatchingDevices = (
 export function registerApi(app: FastifyInstance, announce: Announce, matchingDevices: MatchingDevices) {
   registerOverview(app);
   registerDevices(app);
+  registerEnroll(app);
   registerJobs(app);
   registerResults(app);
   registerSystem(app);

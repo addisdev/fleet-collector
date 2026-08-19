@@ -181,6 +181,23 @@ server-rendered with no build step, so it is the only dashboard that works from
 a bare checkout or when a bundle fails to build. That, and nothing else, is now
 its job.
 
+### Adding a device
+
+`/dash/devices/new` is the enrolment screen: a QR code of the collector's
+address, a download of the newest runner APK straight from the artifact store,
+per-platform install steps, and a panel that watches the registry and names the
+device the moment it registers.
+
+The QR encodes an address derived from the **host's own network interfaces**,
+not from the browser's origin — view the dashboard through an SSH tunnel and
+your origin is `127.0.0.1`, which is a fine URL for you and a useless one for a
+phone. The screen says so and offers the LAN and tailnet addresses instead.
+
+Artifact downloads take `?filename=`, which sets a `content-disposition` so the
+runner arrives on the phone as `fleet-runner-0.2.0.apk` rather than a
+64-character hash Android will not offer to install. The name is stripped to
+`[A-Za-z0-9._-]` before it reaches the header.
+
 ### Vision-eval and drain metrics
 
 Both used to ride in the LLM metric slots — vision put top-1 accuracy in
@@ -256,6 +273,7 @@ in it means the collector restarted and clients should refetch everything.
 | `POST /api/power/:pool/:state` | Fire a pool's smart-plug webhook |
 | `POST /api/system/retention` | Prune old beacons and events; dry-runs unless `dry_run:false` |
 | `GET /api/executors` | Host-executor liveness, derived from their long-poll traffic |
+| `GET /api/enroll` | Addresses a device can reach this collector on, the newest runner APK, and who is already enrolled |
 | `GET /api/alerts?state=` | Current alerts; `open,acked,snoozed` unless asked otherwise |
 | `POST /api/alerts/:id/ack`, `POST /api/alerts/:id/snooze` | Quiet one alert; snooze takes `minutes` |
 | `POST /api/alerts/tick` | Force an evaluation now |

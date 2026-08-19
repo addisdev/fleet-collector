@@ -685,6 +685,16 @@ app.get("/artifacts/:sha256", async (req, reply) => {
   const size = statSync(file).size;
   reply.header("accept-ranges", "bytes").header("content-type", "application/octet-stream");
 
+  // ?filename= makes a browser save the artifact under a real name. Without it
+  // a phone downloading the runner gets a 64-character hash with no extension,
+  // which Android will not offer to install. Quoted and stripped of anything
+  // that could break out of the header or the filename.
+  const wanted = (req.query as Record<string, string | undefined>).filename;
+  if (wanted) {
+    const safe = wanted.replace(/[^A-Za-z0-9._-]/g, "").slice(0, 100);
+    if (safe) reply.header("content-disposition", `attachment; filename="${safe}"`);
+  }
+
   const range = req.headers.range;
   const m = range ? /^bytes=(\d*)-(\d*)$/.exec(range) : null;
   if (m && (m[1] !== "" || m[2] !== "")) {
