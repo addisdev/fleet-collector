@@ -182,6 +182,21 @@ server-rendered with no build step, so it is the only dashboard that works from
 a bare checkout or when a bundle fails to build. That, and nothing else, is now
 its job.
 
+### Naming devices
+
+A device id is a machine's answer to "who are you" — `sm-x930-0d41`,
+`sdk-gphone64-arm64-b386`. Fine in a job spec, useless for knowing which slab of
+glass on the shelf just went thermally critical at 3am.
+
+Any device can be given a nickname, inline from the devices list or on its own
+page, and it then appears everywhere the dashboard prints that device: the
+overview's running-now and recent results, job targets and result rows, held
+locks, and alert text. The id always stays visible underneath, because that is
+what job specs, logs and `adb devices` use — hiding it would make the dashboard
+harder to reconcile with everything else, not easier.
+
+Nicknames are operator-set and survive re-registration, like pool overrides.
+
 ### Adding a device
 
 `/dash/devices/new` is the enrolment screen: a QR code of the collector's

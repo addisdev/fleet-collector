@@ -1,6 +1,7 @@
 // The "is the fleet OK" screen. One request, five answers.
 import { useApi, type Overview as OverviewData, type RecentResults } from "../api.js";
-import { Link, Loaded, Panel, Pill, Stat, ago, agoFrom, clock, duration } from "../ui.js";
+import { useDeviceNames } from "../names.js";
+import { DeviceName, Link, Loaded, Panel, Pill, Stat, ago, agoFrom, clock, duration } from "../ui.js";
 
 function LeaseBar({ fraction }: { fraction: number | null }) {
   if (fraction == null) return null;
@@ -19,6 +20,7 @@ export function Overview() {
   // queue age, uptime.
   const state = useApi<OverviewData>("/api/overview", ["job", "device", "beacon", "result", "schedule"], 30_000);
   const recent = useApi<RecentResults>("/api/results/recent?limit=12", ["result"], 60_000);
+  const names = useDeviceNames();
 
   return (
     <>
@@ -97,7 +99,7 @@ export function Overview() {
                           {j.workload} <span class="faint">{j.executor}</span>
                         </td>
                         <td class="wrap-anywhere">
-                          <code>{j.claimed_by ?? "—"}</code>
+                          {j.claimed_by ? <DeviceName id={j.claimed_by} names={names} /> : <span class="faint">—</span>}
                         </td>
                         <td class="num">{duration(j.elapsed_s)}</td>
                         <td>
@@ -208,9 +210,7 @@ export function Overview() {
                               </Link>
                             </td>
                             <td class="wrap-anywhere">
-                              <Link to={`/devices/${encodeURIComponent(x.device_id)}`}>
-                                <code>{x.device_id}</code>
-                              </Link>
+                              <DeviceName id={x.device_id} names={names} />
                             </td>
                             <td class="num">
                               {x.iter}

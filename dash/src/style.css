@@ -413,3 +413,13 @@ pre.cmd {
   border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
   border-radius: 6px; padding: 0.55rem 0.8rem; font-size: 0.86rem; margin: 0.4rem 0;
 }
+
+/* A nickname leads, the id stays underneath: the id is what job specs, logs and
+   `adb devices` use, so hiding it would make the dashboard harder to reconcile
+   with everything else rather than easier. */
+.devid { font-size: 0.72rem; margin-top: 0.1rem; }
+.rename { display: inline-flex; gap: 0.4rem; align-items: center; }
+.rename input {
+  font: inherit; font-size: 0.82rem; padding: 0.2rem 0.4rem; width: 11rem;
+  background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 5px;
+}
