@@ -38,7 +38,7 @@ export function evaluate(now = new Date(), sizes: { dbBytes: number; logBytes: n
   // --- devices ---
   const devices = db
     .prepare(
-      `SELECT device_id, pools, pools_override, last_beacon, nickname,
+      `SELECT device_id, pools, pools_override, last_beacon, name,
               CAST(strftime('%s','now') - strftime('%s', last_seen) AS INTEGER) AS age_s
        FROM devices`,
     )
@@ -47,18 +47,20 @@ export function evaluate(now = new Date(), sizes: { dbBytes: number; logBytes: n
     pools: string;
     pools_override: string | null;
     last_beacon: string | null;
-    nickname: string | null;
+    name: string | null;
     age_s: number;
   }[];
 
   for (const d of devices) {
-    const name = d.nickname ? `${d.nickname} (${d.device_id})` : d.device_id;
+    // The device's name if it has one, always with the id, because an alert
+    // is often read somewhere the id is what you need to act on it.
+    const label = d.name ? `${d.name} (${d.device_id})` : d.device_id;
     if (d.age_s > THRESHOLDS.deviceOfflineS) {
       out.push({
         rule: "device-offline",
         subject: d.device_id,
         severity: "warning",
-        message: `${name} has not checked in for ${Math.round(d.age_s / 60)} min`,
+        message: `${label} has not checked in for ${Math.round(d.age_s / 60)} min`,
       });
       // Battery and thermal readings from a silent device describe whenever it
       // went silent, so they are not worth alerting on.
@@ -67,13 +69,13 @@ export function evaluate(now = new Date(), sizes: { dbBytes: number; logBytes: n
 
     const b = beaconFields(parse<Record<string, unknown> | null>(d.last_beacon, null));
     if (b?.thermal === "critical")
-      out.push({ rule: "thermal-critical", subject: d.device_id, severity: "critical", message: `${name} is thermally critical` });
+      out.push({ rule: "thermal-critical", subject: d.device_id, severity: "critical", message: `${label} is thermally critical` });
     if (hasBattery(b?.battery_pct) && b!.battery_pct! < THRESHOLDS.lowBatteryPct && b?.charging === false)
       out.push({
         rule: "low-battery",
         subject: d.device_id,
         severity: "warning",
-        message: `${name} is at ${b!.battery_pct}% and not charging`,
+        message: `${label} is at ${b!.battery_pct}% and not charging`,
       });
   }
 

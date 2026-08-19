@@ -9,14 +9,14 @@ import { Battery, Thermal } from "./Devices.js";
 const WINDOWS = [6, 24, 72, 168];
 
 function DeviceEditor({ device, onDone }: { device: Detail; onDone: () => void }) {
-  const [nickname, setNickname] = useState(device.nickname ?? "");
+  const [name, setNickname] = useState(device.name ?? "");
   const [notes, setNotes] = useState(device.notes ?? "");
   const [pools, setPools] = useState((device.pools_override ?? device.pools).join(", "));
 
   const save = useMutation(async () => {
     const list = pools.split(",").map((p) => p.trim()).filter(Boolean);
     const r = await mutate("PATCH", `/api/devices/${encodeURIComponent(device.device_id)}`, {
-      nickname: nickname || null,
+      name: name || null,
       notes: notes || null,
       pools: list,
     });
@@ -48,8 +48,8 @@ function DeviceEditor({ device, onDone }: { device: Detail; onDone: () => void }
   return (
     <>
       <div class="filters">
-        <Field label="nickname" hint="shown beside the device id">
-          <input value={nickname} onChange={(e) => setNickname((e.target as HTMLInputElement).value)} />
+        <Field label="name" hint="what this device is called everywhere in the dashboard">
+          <input value={name} onChange={(e) => setNickname((e.target as HTMLInputElement).value)} />
         </Field>
         <Field label="pools" hint="comma separated — overrides what the runner reports">
           <input value={pools} onChange={(e) => setPools((e.target as HTMLInputElement).value)} />
@@ -103,9 +103,9 @@ export function DeviceDetail({ id }: { id: string }) {
   return (
     <>
       <h1 class="wrap-anywhere">
-        {state.data?.nickname ? (
+        {state.data?.name ? (
           <>
-            {state.data.nickname} <span class="faint mono">{id}</span>
+            {state.data.name} <span class="faint mono">{id}</span>
           </>
         ) : (
           <code>{id}</code>

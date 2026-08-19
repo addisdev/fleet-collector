@@ -188,14 +188,19 @@ A device id is a machine's answer to "who are you" — `sm-x930-0d41`,
 `sdk-gphone64-arm64-b386`. Fine in a job spec, useless for knowing which slab of
 glass on the shelf just went thermally critical at 3am.
 
-Any device can be given a nickname, inline from the devices list or on its own
-page, and it then appears everywhere the dashboard prints that device: the
-overview's running-now and recent results, job targets and result rows, held
-locks, and alert text. The id always stays visible underneath, because that is
-what job specs, logs and `adb devices` use — hiding it would make the dashboard
-harder to reconcile with everything else, not easier.
+**Click a device's name in the list to rename it.** There is no separate
+nickname: the name is what the device is called, and an unnamed device shows its
+id because until you name it, that is its name. Enter or clicking away saves,
+Escape cancels.
 
-Nicknames are operator-set and survive re-registration, like pool overrides.
+The name then appears everywhere the dashboard prints that device — the
+overview's running-now and recent results, job targets and result rows, held
+locks, alert text. The id stays available on hover and on the device's own page,
+since it is what job specs pin and what `adb devices` prints.
+
+Names are operator-set and survive re-registration, like pool overrides. The
+column was called `nickname` until it was renamed in place; existing names carry
+over.
 
 ### Adding a device
 

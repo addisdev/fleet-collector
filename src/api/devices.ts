@@ -8,14 +8,14 @@ type DeviceRow = {
   descriptor: string;
   pools: string;
   pools_override: string | null;
-  nickname: string | null;
+  name: string | null;
   notes: string | null;
   last_seen: string;
   last_beacon: string | null;
   age_s: number | null;
 };
 
-const DEVICE_SELECT = `SELECT device_id, descriptor, pools, pools_override, nickname, notes,
+const DEVICE_SELECT = `SELECT device_id, descriptor, pools, pools_override, name, notes,
                               last_seen, last_beacon, ${AGE("last_seen")} AS age_s
                        FROM devices`;
 
@@ -24,7 +24,7 @@ function shapeDevice(d: DeviceRow) {
   const beacon = beaconFields(parse<Record<string, unknown> | null>(d.last_beacon, null));
   return {
     device_id: d.device_id,
-    nickname: d.nickname,
+    name: d.name,
     notes: d.notes,
     descriptor,
     // `pools` is what the queue actually uses; the two sources stay visible

@@ -103,7 +103,7 @@ export type Beacon = {
 
 export type Device = {
   device_id: string;
-  nickname: string | null;
+  name: string | null;
   notes: string | null;
   descriptor: Record<string, unknown>;
   /** Effective pools: the override when set, otherwise what the runner reports. */

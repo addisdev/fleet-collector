@@ -423,3 +423,17 @@ pre.cmd {
   font: inherit; font-size: 0.82rem; padding: 0.2rem 0.4rem; width: 11rem;
   background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 5px;
 }
+
+/* Click the name to rename it: the thing you want to change is the thing you
+   click, so there is no button beside it and no second column. */
+.name-btn {
+  background: none; border: 0; padding: 0.1rem 0.25rem; margin: -0.1rem -0.25rem;
+  font: inherit; color: inherit; cursor: text; text-align: left; border-radius: 4px;
+}
+.name-btn:hover { background: var(--panel-2); outline: 1px dashed var(--line); }
+.name-edit { display: inline-flex; gap: 0.4rem; align-items: center; }
+.name-edit input {
+  font: inherit; font-size: 0.85rem; padding: 0.15rem 0.35rem; width: 12rem;
+  background: var(--panel-2); color: var(--ink); border: 1px solid var(--accent); border-radius: 5px;
+}
+.open-link { font-size: 0.72rem; }
