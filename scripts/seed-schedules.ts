@@ -33,7 +33,7 @@ const SCHEDULES: Record<string, Schedule> = {
       "app": {
         "name": "fleet-runner",
         "build": "0.2.0-a7e3141",
-        "sha256": "6f9c91a9aa3940c774d871100ecf411e4f2a5ebd3f90180372d0922db9fd94d5"
+        "sha256": "c512589b7ad976518fee8ca26615b8fc7ede4480ebdb6606c3390fd1c4f05a0c"
       },
       "suite": {
         "kind": "maestro",
