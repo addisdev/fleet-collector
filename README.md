@@ -13,6 +13,7 @@ npm install
 npm start          # collector on :8788 (FLEET_PORT to change)
 npm run executor   # host executor: claims host jobs, drives devices via adb + Maestro
 npm run smoke      # end-to-end check against a running collector
+npm run seed:schedules # upsert the nightly/weekly runs (idempotent, never enables)
 
 npm run dash:install   # one-time: dashboard build deps (vite + preact)
 npm run dash:build     # build the dashboard to dash/dist
@@ -308,6 +309,27 @@ Note the device and executor paths (`/devices/:id/next-job`,
 fleet must keep running whether or not anyone has a token. This is a speed bump, not authentication — `POST /jobs` stays open for
 CI and curl, so anyone who can reach the collector can still enqueue. What the
 token buys is that a stray tab or misfired script cannot *cancel* or *delete*.
+
+## Schedules and targeting
+
+The nightly and weekly runs live in [`scripts/seed-schedules.ts`](scripts/seed-schedules.ts),
+not only in the database. `npm run seed:schedules` upserts them; it is idempotent
+and preserves the on/off state of anything already there, so re-running can
+never quietly switch off a run someone turned on. New schedules always arrive
+disabled.
+
+They target with **`targets.match`, not pools**. A pool is a label someone has
+to keep accurate as the shelf changes; a match is a statement about what the job
+needs, evaluated against each device's own descriptor when it claims.
+
+The plant-id eval is the case that proves the difference: it is `litert` with a
+`.tflite` model, so it is Android-only. Under `pool: ml-capable` it fanned out to
+three iOS simulators that cannot load it at all. As
+`os ~ 'android' && ram_mb >= 3000` it selects the two Android devices that can —
+the 3000 MB floor being what the published eval actually demonstrates, on the
+3922 MB ATD emulator.
+
+Pools still exist and devices still report them; nothing routes on them.
 
 ## Alerts
 
