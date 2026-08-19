@@ -8,6 +8,7 @@ import { JobDetail } from "./pages/JobDetail.js";
 import { Jobs } from "./pages/Jobs.js";
 import { Overview } from "./pages/Overview.js";
 import { Schedules } from "./pages/Schedules.js";
+import { Results } from "./pages/Results.js";
 import { STUBS, Stub } from "./pages/Stub.js";
 import { System } from "./pages/System.js";
 
@@ -67,6 +68,7 @@ function Router() {
   if (match("/jobs", route)) return <Jobs />;
   // Before /jobs/:id, or "new" would be read as a job id.
   if (match("/jobs/new", route)) return <Compose />;
+  if (match("/results", route)) return <Results />;
   if (match("/schedules", route)) return <Schedules />;
 
   // Keyed on the id so switching between two detail pages remounts rather than
@@ -77,7 +79,6 @@ function Router() {
   if (job) return <JobDetail key={job.id} id={job.id} />;
 
   for (const [path, key] of [
-    ["/results", "results"],
     ["/artifacts", "artifacts"],
     ["/events", "events"],
     ["/events/:topic", "events"],
@@ -111,7 +112,7 @@ export function App() {
         <a href="/dash/legacy">legacy dashboard</a>
         <a href="/api/overview">/api/overview</a>
         <a href="/api/health">/api/health</a>
-        <span>D2 — job control and composer</span>
+        <span>D3 — results</span>
       </footer>
     </div>
   );

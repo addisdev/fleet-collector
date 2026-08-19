@@ -809,6 +809,31 @@ console.log(`smoke against ${BASE}`);
   );
 }
 
+// 29b. results views (plan D3)
+{
+  const drain = await json("GET", "/api/results/drain");
+  check("drain view answers", drain.status === 200 && Array.isArray(drain.body?.runs));
+  const soak = await json("GET", "/api/results/soak");
+  check("soak view answers", soak.status === 200 && Array.isArray(soak.body?.runs));
+  const vision = await json("GET", "/api/results/vision");
+  check("vision view answers", vision.status === 200 && Array.isArray(vision.body?.runs));
+  const ui = await json("GET", "/api/results/ui");
+  check("ui view builds a build x device matrix", Array.isArray(ui.body?.matrix) && Array.isArray(ui.body?.devices), JSON.stringify(ui.body?.devices));
+  // The executor's own `host:<name>` summary row is not a device and must not
+  // become a column in the matrix.
+  check("ui matrix excludes the host executor row", !(ui.body?.devices ?? []).some((d: string) => d.startsWith("host:")), JSON.stringify(ui.body?.devices));
+
+  // A device named by the fleet's own simulator convention must be flagged, or
+  // it lands in a hardware comparison.
+  const SIMDEV = `iphone-sim-${run}`;
+  await json("POST", "/devices/register", { device_id: SIMDEV, descriptor: { model: "arm64", os: "ios-18.4" }, pools: [] });
+  const devs = await json("GET", "/api/devices");
+  const simRow = (devs.body?.devices ?? []).find((d: any) => d.device_id === SIMDEV);
+  check("a -sim- device id is detected as a simulator", simRow?.simulator === true, JSON.stringify(simRow?.simulator));
+  const realRow = (devs.body?.devices ?? []).find((d: any) => d.device_id === DEVICE);
+  check("a real device is not mistaken for a simulator", realRow?.simulator === false, JSON.stringify(realRow?.simulator));
+}
+
 // 29. the legacy dashboard's own links still resolve to legacy pages
 {
   const html = await (await fetch(`${BASE}/dash/legacy`)).text();

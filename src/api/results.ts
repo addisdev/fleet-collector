@@ -7,7 +7,7 @@
 // merge prefill and decode, because they are never summed into one number.
 import type { FastifyInstance } from "fastify";
 import { db } from "../db.js";
-import { AGE, inClause, iso, isSimulator, paging, parse } from "./shared.js";
+import { AGE, beaconFields, inClause, iso, isSimulator, paging, parse } from "./shared.js";
 
 type ResultRow = {
   job_id: string;
@@ -177,8 +177,8 @@ export function registerResults(app: FastifyInstance) {
     };
   });
 
-  // Pass/fail per (build, device) for ui-test jobs — the shape the D3 matrix
-  // needs, exposed now so the API contract is settled.
+  // Pass/fail per (build, device) for ui-test jobs, plus the matrix the D3
+  // screen renders: builds down, devices across.
   app.get("/api/results/ui", async () => {
     const rows = db
       .prepare(
@@ -189,22 +189,233 @@ export function registerResults(app: FastifyInstance) {
       )
       .all() as { job_id: string; device_id: string; payload: string; created_at: string; spec: string }[];
 
+    const runs = rows.map((r) => {
+      const spec = parse<Record<string, any>>(r.spec, {});
+      const payload = parse<Record<string, any>>(r.payload, {});
+      return {
+        job_id: r.job_id,
+        device_id: r.device_id,
+        at: iso(r.created_at),
+        app: spec.app?.name ?? null,
+        build: spec.app?.build ?? null,
+        suite: spec.suite?.kind ?? null,
+        ok: payload.ok !== false,
+        passed: payload.test?.passed ?? null,
+        failed: payload.test?.failed ?? null,
+        artifacts: (payload.test?.artifacts ?? payload.artifacts ?? []) as string[],
+      };
+    });
+
+    // The host executor also posts a `host:<name>` summary row per job. It is
+    // the executor's verdict, not a device's, and putting it in a device column
+    // would invent a device that does not exist.
+    const deviceRuns = runs.filter((r) => !r.device_id.startsWith("host:"));
+    const builds = [...new Set(deviceRuns.map((r) => `${r.app ?? "?"} ${r.build ?? "?"}`))];
+    const devices = [...new Set(deviceRuns.map((r) => r.device_id))].sort();
+
+    const matrix = builds.map((build) => ({
+      build,
+      cells: devices.map((device) => {
+        // Newest first, so [0] is the current verdict and the rest are history.
+        const forCell = deviceRuns.filter((r) => `${r.app ?? "?"} ${r.build ?? "?"}` === build && r.device_id === device);
+        const latest = forCell[0] ?? null;
+        // A test that alternates verdict across runs of the same build on the
+        // same device is flaky by definition — nothing about the build or the
+        // device changed between them.
+        const verdicts = forCell.map((r) => r.ok);
+        return {
+          device,
+          latest,
+          runs: forCell.length,
+          flaky: new Set(verdicts).size > 1,
+        };
+      }),
+    }));
+
+    return { runs, builds, devices, matrix };
+  });
+
+  /**
+   * Drain runs: the battery curve per device, and how fast it fell.
+   *
+   * Percent-per-hour is read from metrics.drain_pct_per_h when present. Older
+   * rows put it in decode_tok_s because there was no field for it, so those are
+   * returned with pct_per_h_inferred set — a number labelled "tok/s" in storage
+   * must not be charted as tok/s, and must not be silently relabelled either.
+   */
+  app.get("/api/results/drain", async () => {
+    const jobs = db
+      .prepare(
+        `SELECT job_id, spec, status, created_at, finished_at FROM jobs
+         WHERE workload = 'drain' ORDER BY created_at DESC LIMIT 50`,
+      )
+      .all() as { job_id: string; spec: string; status: string; created_at: string; finished_at: string | null }[];
+
     return {
-      runs: rows.map((r) => {
+      runs: jobs.map((j) => {
+        const spec = parse<Record<string, any>>(j.spec, {});
+        const summaries = (
+          db
+            .prepare(
+              `SELECT device_id, payload FROM results
+               WHERE job_id = ? AND iter = 0 AND device_id NOT LIKE 'host:%'`,
+            )
+            .all(j.job_id) as { device_id: string; payload: string }[]
+        ).map((r) => {
+          const p = parse<Record<string, any>>(r.payload, {});
+          const m = p.metrics ?? {};
+          const explicit = typeof m.drain_pct_per_h === "number" ? m.drain_pct_per_h : null;
+          return {
+            device_id: r.device_id,
+            ok: p.ok !== false,
+            battery_start_pct: m.battery_start_pct ?? null,
+            battery_end_pct: m.battery_end_pct ?? null,
+            pct_per_h: explicit ?? (typeof m.decode_tok_s === "number" ? m.decode_tok_s : null),
+            pct_per_h_inferred: explicit === null && typeof m.decode_tok_s === "number",
+            error: p.error ?? null,
+          };
+        });
+
+        // The curve itself comes from the beacons the run posted: one sample
+        // per check, carrying battery and whether the app was still alive.
+        const curve = (
+          db
+            .prepare("SELECT device_id, ts, sample FROM beacon_samples WHERE job_id = ? ORDER BY ts LIMIT 5000")
+            .all(j.job_id) as { device_id: string; ts: string; sample: string }[]
+        ).map((b) => ({ device_id: b.device_id, ts: iso(b.ts), ...beaconFields(parse<Record<string, unknown>>(b.sample, {})) }));
+
+        return {
+          job_id: j.job_id,
+          status: j.status,
+          app: spec.app?.name ?? spec.params?.app_id ?? null,
+          build: spec.app?.build ?? null,
+          scenario: spec.params?.scenario ?? null,
+          started_at: iso(j.created_at),
+          finished_at: iso(j.finished_at),
+          devices: summaries,
+          curve,
+        };
+      }),
+    };
+  });
+
+  /**
+   * Soak runs: the OEM-task-killer survival matrix. The measurement is simply
+   * whether the process was still alive at each check, so the timeline is the
+   * result — a single pass/fail would throw away when it died.
+   */
+  app.get("/api/results/soak", async () => {
+    const jobs = db
+      .prepare(
+        `SELECT job_id, spec, status, created_at, finished_at FROM jobs
+         WHERE workload = 'soak' ORDER BY created_at DESC LIMIT 50`,
+      )
+      .all() as { job_id: string; spec: string; status: string; created_at: string; finished_at: string | null }[];
+
+    return {
+      runs: jobs.map((j) => {
+        const spec = parse<Record<string, any>>(j.spec, {});
+        const checks = (
+          db
+            .prepare(
+              `SELECT device_id, iter, payload, created_at FROM results
+               WHERE job_id = ? AND iter > 0 AND device_id NOT LIKE 'host:%' ORDER BY device_id, iter`,
+            )
+            .all(j.job_id) as { device_id: string; iter: number; payload: string; created_at: string }[]
+        ).map((r) => {
+          const p = parse<Record<string, any>>(r.payload, {});
+          return { device_id: r.device_id, iter: r.iter, alive: p.ok !== false, at: iso(r.created_at), error: p.error ?? null };
+        });
+
+        const devices = [...new Set(checks.map((c) => c.device_id))].sort();
+        return {
+          job_id: j.job_id,
+          status: j.status,
+          app: spec.params?.app_id ?? spec.app?.name ?? null,
+          started_at: iso(j.created_at),
+          finished_at: iso(j.finished_at),
+          devices: devices.map((device) => {
+            const mine = checks.filter((c) => c.device_id === device);
+            const died = mine.find((c) => !c.alive) ?? null;
+            return {
+              device_id: device,
+              checks: mine,
+              survived: mine.length > 0 && mine.every((c) => c.alive),
+              // When it died matters more than that it died: an app killed at
+              // check 2 and one killed at check 40 are different findings.
+              died_at_check: died?.iter ?? null,
+              died_at: died?.at ?? null,
+            };
+          }),
+        };
+      }),
+    };
+  });
+
+  /**
+   * Vision-eval runs (batch jobs on a vision backend): accuracy and latency per
+   * model per device.
+   *
+   * Runners that predate the named metric fields encoded these in LLM slots —
+   * top-1 in decode_tok_s, p50 in ttft_ms, images/sec in prefill_tok_s — and
+   * had nowhere at all to put top-5 or p95, which is why the published eval
+   * report carries numbers this table cannot. Inferred values are flagged and
+   * the missing ones are returned as null rather than guessed.
+   */
+  app.get("/api/results/vision", async () => {
+    const VISION_BACKENDS = new Set(["litert", "coreml", "tflite", "vision"]);
+    const rows = db
+      .prepare(
+        `SELECT r.job_id, r.device_id, r.payload, r.created_at, j.spec
+         FROM results r JOIN jobs j ON j.job_id = r.job_id
+         WHERE j.workload = 'batch' AND json_extract(r.payload, '$.final') = 1
+         ORDER BY r.created_at DESC LIMIT 500`,
+      )
+      .all() as { job_id: string; device_id: string; payload: string; created_at: string; spec: string }[];
+
+    const descriptors = new Map(
+      (db.prepare("SELECT device_id, descriptor FROM devices").all() as { device_id: string; descriptor: string }[]).map(
+        (d) => [d.device_id, parse<Record<string, unknown>>(d.descriptor, {})],
+      ),
+    );
+
+    const runs = rows
+      .filter((r) => VISION_BACKENDS.has(String(parse<Record<string, any>>(r.spec, {}).backend ?? "")))
+      .map((r) => {
         const spec = parse<Record<string, any>>(r.spec, {});
-        const payload = parse<Record<string, any>>(r.payload, {});
+        const p = parse<Record<string, any>>(r.payload, {});
+        const m = p.metrics ?? {};
+        const named = typeof m.top1_pct === "number" || typeof m.p50_ms === "number";
+        const descriptor = descriptors.get(r.device_id) ?? {};
         return {
           job_id: r.job_id,
           device_id: r.device_id,
+          device_model: descriptor.model ?? null,
+          simulator: isSimulator(descriptor, r.device_id),
           at: iso(r.created_at),
-          app: spec.app?.name ?? null,
-          build: spec.app?.build ?? null,
-          suite: spec.suite?.kind ?? null,
-          ok: payload.ok !== false,
-          passed: payload.test?.passed ?? null,
-          failed: payload.test?.failed ?? null,
+          model: spec.model?.name ?? null,
+          quant: spec.model?.quant ?? null,
+          backend: spec.backend ?? null,
+          accel: spec.params?.accelerator ?? spec.params?.delegate ?? null,
+          top1_pct: named ? (m.top1_pct ?? null) : (typeof m.decode_tok_s === "number" ? m.decode_tok_s : null),
+          // Never inferred: no legacy slot ever carried these.
+          top5_pct: m.top5_pct ?? null,
+          p50_ms: named ? (m.p50_ms ?? null) : (typeof m.ttft_ms === "number" ? m.ttft_ms : null),
+          p95_ms: m.p95_ms ?? null,
+          images_per_s: named ? (m.images_per_s ?? null) : (typeof m.prefill_tok_s === "number" ? m.prefill_tok_s : null),
+          load_ms: m.load_ms ?? null,
+          peak_mem_mb: m.peak_mem_mb ?? null,
+          mem_method: m.mem_method ?? null,
+          inferred: !named,
         };
-      }),
+      });
+
+    return {
+      runs,
+      // So the page can say once, at the top, that some rows are being read
+      // through a convention rather than a contract.
+      inferred_count: runs.filter((r) => r.inferred).length,
+      missing_top5: runs.filter((r) => r.top5_pct == null).length,
     };
   });
 

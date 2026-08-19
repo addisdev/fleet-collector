@@ -123,6 +123,112 @@ export function TimeSeries({
   );
 }
 
+/** Horizontal bars for comparing one measurement across devices. Horizontal
+ *  because device ids are long: vertical bars would need rotated labels. */
+export function Bars({
+  items,
+  unit = "",
+  digits = 1,
+}: {
+  items: { label: string; value: number | null; note?: string; muted?: boolean }[];
+  unit?: string;
+  digits?: number;
+}) {
+  const real = items.filter((i) => typeof i.value === "number") as { label: string; value: number }[];
+  if (real.length === 0) return <p class="empty">Nothing to compare yet.</p>;
+  const max = Math.max(...real.map((i) => i.value), 0) || 1;
+
+  return (
+    <div class="bars">
+      {items.map((i) => (
+        <div class={`bar-row${i.muted ? " muted" : ""}`} key={i.label}>
+          <span class="bar-label mono" title={i.label}>
+            {i.label}
+          </span>
+          <span class="bar-track">
+            <i style={{ width: `${typeof i.value === "number" ? Math.max(0.5, (i.value / max) * 100) : 0}%` }} />
+          </span>
+          <span class="bar-value">
+            {typeof i.value === "number" ? i.value.toFixed(digits) : "—"}
+            {unit && typeof i.value === "number" ? ` ${unit}` : ""}
+            {i.note && <span class="faint"> {i.note}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const SERIES_CLASSES = ["s0", "s1", "s2", "s3", "s4", "s5"];
+
+/** Several lines on shared axes — benchmark trends over time, or two drain runs
+ *  overlaid. Each series breaks on gaps for the same reason a single one does. */
+export function MultiSeries({
+  series,
+  yMax,
+  yMin = 0,
+  unit = "",
+  gapMs = Number.POSITIVE_INFINITY,
+}: {
+  series: { name: string; points: Point[]; muted?: boolean }[];
+  yMax?: number;
+  yMin?: number;
+  unit?: string;
+  gapMs?: number;
+}) {
+  const all = series.flatMap((s) => s.points).filter((p) => p.v != null) as { t: number; v: number }[];
+  if (all.length === 0) return <p class="empty">No data in this view.</p>;
+
+  const t0 = Math.min(...all.map((p) => p.t));
+  const t1 = Math.max(...all.map((p) => p.t));
+  // Headroom above the tallest point so a peak is not clipped by the axis.
+  const top = yMax ?? (Math.max(...all.map((p) => p.v)) * 1.1 || 1);
+  const span = Math.max(1, t1 - t0);
+  const x = (t: number) => PAD.left + ((t - t0) / span) * (W - PAD.left - PAD.right);
+  const y = (v: number) => PAD.top + (1 - (v - yMin) / (top - yMin)) * (H - PAD.top - PAD.bottom);
+  const yTicks = [yMin, (yMin + top) / 2, top];
+
+  return (
+    <div class="chart">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img">
+        {yTicks.map((v) => (
+          <g key={v}>
+            <line class="chart-grid" x1={PAD.left} x2={W - PAD.right} y1={y(v)} y2={y(v)} />
+            <text class="chart-label" x={PAD.left - 5} y={y(v) + 3} text-anchor="end">
+              {v.toFixed(top < 10 ? 1 : 0)}
+            </text>
+          </g>
+        ))}
+        {[t0, t0 + span / 2, t1].map((t, i) => (
+          <text key={t} class="chart-label" x={x(t)} y={H - 6} text-anchor={i === 0 ? "start" : i === 2 ? "end" : "middle"}>
+            {new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+          </text>
+        ))}
+        {series.map((s, i) => (
+          <g key={s.name}>
+            <path class={`chart-line ${SERIES_CLASSES[i % SERIES_CLASSES.length]}${s.muted ? " muted" : ""}`} d={linePath(s.points, x, y, gapMs)} />
+            {/* A single sample has no line to draw, so mark the point itself —
+                otherwise a device that ran once looks like it never ran. */}
+            {s.points.filter((p) => p.v != null).length === 1 &&
+              s.points
+                .filter((p) => p.v != null)
+                .map((p) => <circle key={p.t} class={`chart-dot ${SERIES_CLASSES[i % SERIES_CLASSES.length]}`} cx={x(p.t)} cy={y(p.v!)} r={3} />)}
+          </g>
+        ))}
+      </svg>
+      <div class="chart-legend">
+        {series.map((s, i) => (
+          <span class="chart-key" key={s.name}>
+            <i class={`swatch ${SERIES_CLASSES[i % SERIES_CLASSES.length]}`} />
+            <span class={s.muted ? "faint" : ""}>{s.name}</span>
+          </span>
+        ))}
+        {unit && <span class="faint">{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
 // The shared thermal enum, worst last. The runners map every platform's native
 // state onto these four so a strip like this is comparable across the fleet.
 const THERMAL = ["nominal", "fair", "serious", "critical"];

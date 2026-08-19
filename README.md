@@ -159,19 +159,33 @@ Building the dashboard is what `dash:build` does; `dash:dev` runs Vite's dev
 server on :5178 and proxies `/api` to `FLEET_URL` (default `127.0.0.1:8788`), so
 you can develop the UI against the live fleet without a mock.
 
-**What is built (plan D0–D2):** the read API, the live event stream, and the
+**What is built (plan D0–D3):** the read API, the live event stream, and the
 Overview, Devices, Jobs, Schedules and System screens — including device detail
 with a 24 h battery/thermal chart, job detail with per-device results and
 artifacts, and filters that live in the URL so a filtered view is a link you can
 send. Jobs can be composed, enqueued, cancelled, retried and reprioritised from
-the browser; devices can be renamed, annotated and re-pooled. Results, Artifacts
-and Events are stubs that name their phase and link the endpoint that already
-backs them.
+the browser; devices can be renamed, annotated and re-pooled. Results has views
+for benchmarks, vision evals, UI tests, drain and soak. Artifacts and Events are
+stubs that name their phase and link the endpoint that already backs them.
 
-The legacy dashboard is **still needed for one thing**: the cross-device
-benchmark comparison at `/dash/legacy/bench`. The SPA shows per-device
-benchmarks on a device page but not the comparison table; that arrives with the
-trend charts in D3, and legacy can go then.
+The legacy dashboard has **no unique feature left** — the cross-device benchmark
+comparison now lives in the SPA — but it is deliberately kept. It is
+server-rendered with no build step, so it is the only dashboard that works from
+a bare checkout or when a bundle fails to build. That, and nothing else, is now
+its job.
+
+### A caveat about vision-eval and drain numbers
+
+Runners that predate `metrics.top1_pct` and friends encode vision-eval results
+in the LLM metric slots — top-1 accuracy in `decode_tok_s`, p50 latency in
+`ttft_ms`, throughput in `prefill_tok_s` — and drain runs put percent-per-hour
+in `decode_tok_s` too. **Top-5 and p95 were never stored anywhere**, which is
+why the published plant-ID report carries numbers the dashboard cannot show.
+
+`schemas/result.schema.json` now defines the named fields. The Results screen
+reads them when present, falls back to the old convention otherwise, and marks
+every value it had to infer. Until the runner apps emit the named fields, the
+vision view supplements the hand-written eval report rather than replacing it.
 
 ### Read API
 
@@ -192,7 +206,10 @@ client to get it wrong. Every list is bounded.
 | `GET /api/jobs/:id` | Spec, results, beacons, artifacts (input vs output, and whether they are actually in the store), locks, fan-out parent/siblings/children, status report |
 | `GET /api/results` | Filters: `job`, `device`, `workload`, `final`, `ok`, `from`, `to` |
 | `GET /api/results/bench` | Latest passing run per device per configuration, with per-device history for trends |
-| `GET /api/results/ui` | Pass/fail per (build, device) for `ui-test` jobs |
+| `GET /api/results/ui` | Per-run verdicts plus a build x device matrix with flaky detection |
+| `GET /api/results/vision` | Vision-eval accuracy and latency per model per device; flags inferred values |
+| `GET /api/results/drain` | Drain runs: battery curve per device and percent-per-hour |
+| `GET /api/results/soak` | Soak runs: the per-check process-alive timeline per device |
 | `GET /api/results/recent` | Newest result rows with a one-line summary |
 | `GET /api/schedules` | Schedules with computed `next_run` and missed-fire detection |
 | `GET /api/artifacts` | Store listing with on-disk state and reference counts |
