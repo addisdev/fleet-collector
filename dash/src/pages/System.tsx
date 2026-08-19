@@ -3,8 +3,8 @@
 // README warns about and nothing else answers.
 import { useState } from "preact/hooks";
 import { useApi, type Locks } from "../api.js";
-import { useToken } from "../mutate.js";
-import { Actions, Button, Field, Link, Loaded, Panel, Pill, Stat, bytes, clock, duration } from "../ui.js";
+import { mutate, useMutation, useToken } from "../mutate.js";
+import { Actions, Button, ConfirmButton, ErrorBox, Field, Link, Loaded, Panel, Pill, Stat, agoFrom, bytes, clock, duration } from "../ui.js";
 
 function TokenPanel({ required }: { required: boolean }) {
   const [saved, save] = useToken();
@@ -59,9 +59,149 @@ type SystemData = {
 // launchd does not rotate the collector's log and it writes a line per request.
 const LOG_WARN_BYTES = 200 * 1024 * 1024;
 
+type Executors = {
+  executors: { name: string; last_seen: string | null; last_job: string | null; polls: number; age_s: number; status: string }[];
+  queued_host_jobs: number;
+};
+
+function Operations({ pools, onDone }: { pools: string[]; onDone: () => void }) {
+  const sweep = useMutation(async () => {
+    const r = await mutate<{ requeued: string[]; failed: string[] }>("POST", "/api/system/sweep", {});
+    onDone();
+    return r;
+  });
+  const tick = useMutation(async () => {
+    const r = await mutate<{ fired: string[] }>("POST", "/api/system/scheduler-tick", {});
+    onDone();
+    return r;
+  });
+  const [retention, setRetention] = useState({ beacon_days: 30, event_days: 30 });
+  const dryRun = useMutation(() =>
+    mutate<{ would_delete: { beacons: number; events: number } }>("POST", "/api/system/retention", {
+      ...retention,
+      dry_run: true,
+    }),
+  );
+  const purge = useMutation(async () => {
+    const r = await mutate("POST", "/api/system/retention", { ...retention, dry_run: false });
+    dryRun.reset();
+    onDone();
+    return r;
+  });
+
+  return (
+    <>
+      <Panel title="Run now">
+        <Actions>
+          <Button busy={sweep.busy} onClick={() => void sweep.go()} title="Requeue or fail claims whose lease has lapsed">
+            Sweep leases
+          </Button>
+          <Button busy={tick.busy} onClick={() => void tick.go()} title="Evaluate schedules for the current minute">
+            Scheduler tick
+          </Button>
+        </Actions>
+        {sweep.error && <ErrorBox error={sweep.error} />}
+        {tick.error && <ErrorBox error={tick.error} />}
+        {sweep.result && (
+          <p class="empty">
+            Requeued {(sweep.result as { requeued: string[] }).requeued.length}, failed{" "}
+            {(sweep.result as { failed: string[] }).failed.length}.
+          </p>
+        )}
+        {tick.result && <p class="empty">Fired {(tick.result as { fired: string[] }).fired.length} schedule(s).</p>}
+      </Panel>
+
+      {pools.length > 0 && <PowerPanel pools={pools} />}
+
+      <Panel title="Retention">
+        <p class="stub">
+          A 60-second beacon is roughly 1,400 rows per device per day, and those rows are what the battery charts read.
+          Pruning is manual on purpose — a nightly job quietly deleting measurements is a worse default than a button.
+        </p>
+        <div class="filters">
+          <label class="field">
+            <span>keep beacons (days)</span>
+            <input
+              type="number"
+              min={1}
+              value={retention.beacon_days}
+              onChange={(e) => setRetention({ ...retention, beacon_days: Number((e.target as HTMLInputElement).value) || 1 })}
+            />
+          </label>
+          <label class="field">
+            <span>keep events (days)</span>
+            <input
+              type="number"
+              min={1}
+              value={retention.event_days}
+              onChange={(e) => setRetention({ ...retention, event_days: Number((e.target as HTMLInputElement).value) || 1 })}
+            />
+          </label>
+        </div>
+        <Actions>
+          <Button busy={dryRun.busy} onClick={() => void dryRun.go()}>
+            Count what would go
+          </Button>
+          {dryRun.result && (
+            <ConfirmButton
+              confirm={`Yes, delete ${(dryRun.result as { would_delete: { beacons: number; events: number } }).would_delete.beacons} beacons and ${(dryRun.result as { would_delete: { beacons: number; events: number } }).would_delete.events} events`}
+              busy={purge.busy}
+              onConfirm={() => void purge.go()}
+            >
+              Prune
+            </ConfirmButton>
+          )}
+        </Actions>
+        {dryRun.error && <ErrorBox error={dryRun.error} />}
+        {purge.error && <ErrorBox error={purge.error} />}
+        {dryRun.result && !purge.result && (
+          <p class="empty">
+            Would delete {(dryRun.result as { would_delete: { beacons: number } }).would_delete.beacons} beacon samples
+            and {(dryRun.result as { would_delete: { events: number } }).would_delete.events} events.
+          </p>
+        )}
+        {purge.result && <p class="empty">Pruned.</p>}
+      </Panel>
+    </>
+  );
+}
+
+function PowerPanel({ pools }: { pools: string[] }) {
+  const [last, setLast] = useState<string | null>(null);
+  const fire = useMutation(async () => null);
+
+  const send = async (pool: string, state: "on" | "off") => {
+    try {
+      const r = await mutate<{ webhook_status: number }>("POST", `/api/power/${encodeURIComponent(pool)}/${state}`, {});
+      setLast(`${pool} ${state}: webhook returned ${r.webhook_status}`);
+    } catch (e) {
+      setLast(`${pool} ${state}: ${(e as Error).message}`);
+    }
+  };
+
+  return (
+    <Panel title="Power">
+      <p class="stub">Fires the pool's smart-plug webhook. Cutting power to a pool mid-run will fail its jobs.</p>
+      {pools.map((p) => (
+        <Actions key={p}>
+          <span class="mono">{p}</span>
+          <Button busy={fire.busy} onClick={() => void send(p, "on")}>
+            on
+          </Button>
+          <ConfirmButton confirm={`Yes, cut power to ${p}`} onConfirm={() => void send(p, "off")}>
+            off
+          </ConfirmButton>
+        </Actions>
+      ))}
+      {last && <p class="empty">{last}</p>}
+    </Panel>
+  );
+}
+
 export function System() {
   const state = useApi<SystemData>("/api/system", ["artifact", "job"], 60_000);
   const locks = useApi<Locks>("/api/locks", ["lock", "job"], 30_000);
+  const executors = useApi<Executors>("/api/executors", ["job"], 30_000);
 
   return (
     <>
@@ -100,10 +240,68 @@ export function System() {
           </Panel>
         )}
       </Loaded>
+      <Loaded state={executors} what="executors">
+        {(e) => (
+          <Panel
+            title={`Host executors (${e.executors.length})`}
+            aside={e.queued_host_jobs > 0 ? <Pill kind="claimed">{e.queued_host_jobs} host jobs queued</Pill> : undefined}
+          >
+            {e.executors.length === 0 ? (
+              <p class="empty">
+                No host executor has ever polled this collector. Host jobs — installs, UI tests, drain, soak — cannot
+                run without one.
+              </p>
+            ) : (
+              <div class="scroll">
+                <table>
+                  <tr>
+                    <th>Executor</th>
+                    <th>Status</th>
+                    <th>Last poll</th>
+                    <th>Last job</th>
+                    <th class="right">Polls</th>
+                  </tr>
+                  {e.executors.map((x) => (
+                    <tr key={x.name}>
+                      <td>
+                        <code>{x.name}</code>
+                      </td>
+                      <td>
+                        <Pill kind={x.status === "polling" ? "done" : x.status === "quiet" ? "claimed" : "failed"}>
+                          {x.status}
+                        </Pill>
+                      </td>
+                      <td class="dim">{agoFrom(x.last_seen)}</td>
+                      <td class="wrap-anywhere dim">
+                        {x.last_job ? (
+                          <Link to={`/jobs/${encodeURIComponent(x.last_job)}`}>
+                            <code>{x.last_job}</code>
+                          </Link>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td class="num">{x.polls}</td>
+                    </tr>
+                  ))}
+                </table>
+              </div>
+            )}
+            {e.queued_host_jobs > 0 && e.executors.every((x) => x.status === "gone") && (
+              <p class="error">
+                {e.queued_host_jobs} host job(s) are queued and no executor is polling. Nothing will claim them until
+                one comes back.
+              </p>
+            )}
+          </Panel>
+        )}
+      </Loaded>
+
       <Loaded state={state} what="system info">
         {(d) => (
           <>
             <TokenPanel required={d.health.guard} />
+            <Operations pools={d.power.pools} onDone={state.reload} />
 
             <Panel title="Collector">
               <div class="stats">
@@ -172,19 +370,13 @@ export function System() {
               </div>
             </Panel>
 
-            <Panel title="Power">
-              {d.power.configured ? (
-                <p class="stub">
-                  Smart-plug webhooks configured for: {d.power.pools.map((p) => <code key={p}>{p} </code>)}
-                  <br />
-                  Firing them from here arrives in D4.
-                </p>
-              ) : (
+            {!d.power.configured && (
+              <Panel title="Power">
                 <p class="empty">
-                  No power config at <code>{d.paths.power_config}</code>.
+                  No power config at <code>{d.paths.power_config}</code>. See <code>power.example.json</code>.
                 </p>
-              )}
-            </Panel>
+              </Panel>
+            )}
 
             <Panel title="Paths">
               <div class="scroll">

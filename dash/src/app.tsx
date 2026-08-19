@@ -1,3 +1,4 @@
+import { useKeyboard, SHORTCUTS } from "./keys.js";
 import { useLiveState } from "./live.js";
 import { match, useRoute } from "./router.js";
 import { Link, Panel } from "./ui.js";
@@ -8,7 +9,11 @@ import { JobDetail } from "./pages/JobDetail.js";
 import { Jobs } from "./pages/Jobs.js";
 import { Overview } from "./pages/Overview.js";
 import { Schedules } from "./pages/Schedules.js";
-import { STUBS, Stub } from "./pages/Stub.js";
+import { AlertBanner, Alerts } from "./pages/Alerts.js";
+import { Artifacts } from "./pages/Artifacts.js";
+import { Events } from "./pages/Events.js";
+import { Results } from "./pages/Results.js";
+
 import { System } from "./pages/System.js";
 
 const NAV = [
@@ -19,6 +24,7 @@ const NAV = [
   ["/schedules", "Schedules"],
   ["/artifacts", "Artifacts"],
   ["/events", "Events"],
+  ["/alerts", "Alerts"],
   ["/system", "System"],
 ] as const;
 
@@ -63,10 +69,14 @@ function Router() {
 
   if (match("/", route)) return <Overview />;
   if (match("/system", route)) return <System />;
+  if (match("/alerts", route)) return <Alerts />;
   if (match("/devices", route)) return <Devices />;
   if (match("/jobs", route)) return <Jobs />;
   // Before /jobs/:id, or "new" would be read as a job id.
   if (match("/jobs/new", route)) return <Compose />;
+  if (match("/results", route)) return <Results />;
+  if (match("/artifacts", route)) return <Artifacts />;
+  if (match("/events", route)) return <Events />;
   if (match("/schedules", route)) return <Schedules />;
 
   // Keyed on the id so switching between two detail pages remounts rather than
@@ -76,19 +86,36 @@ function Router() {
   const job = match("/jobs/:id", route);
   if (job) return <JobDetail key={job.id} id={job.id} />;
 
-  for (const [path, key] of [
-    ["/results", "results"],
-    ["/artifacts", "artifacts"],
-    ["/events", "events"],
-    ["/events/:topic", "events"],
-  ] as const) {
-    if (match(path, route)) return <Stub spec={STUBS[key]} />;
-  }
 
   return <NotFound route={route} />;
 }
 
+function Help({ onClose }: { onClose: () => void }) {
+  return (
+    <div class="overlay" onClick={onClose}>
+      <div class="help" onClick={(e) => e.stopPropagation()}>
+        <h2>Keyboard</h2>
+        <table>
+          {SHORTCUTS.map((s) => (
+            <tr key={s.keys}>
+              <td>
+                <kbd>{s.keys}</kbd>
+              </td>
+              <td>{s.does}</td>
+            </tr>
+          ))}
+        </table>
+        <button type="button" class="linkish" onClick={onClose}>
+          close
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
+  const { help, setHelp } = useKeyboard();
+
   return (
     <div class="shell">
       <header class="topbar">
@@ -104,15 +131,18 @@ export function App() {
         </nav>
         <LiveDot />
       </header>
+      <AlertBanner />
       <main>
         <Router />
       </main>
       <footer class="footer">
         <a href="/dash/legacy">legacy dashboard</a>
         <a href="/api/overview">/api/overview</a>
-        <a href="/api/health">/api/health</a>
-        <span>D2 — job control and composer</span>
+        <button type="button" class="linkish" onClick={() => setHelp(true)}>
+          keyboard (?)
+        </button>
       </footer>
+      {help && <Help onClose={() => setHelp(false)} />}
     </div>
   );
 }

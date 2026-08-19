@@ -775,15 +775,12 @@ console.log(`smoke against ${BASE}`);
 
 // 28. a device with no battery telemetry is not a low battery
 {
-  // Measured as one delta, not absolutes: this suite shares a collector with
-  // whatever ran before it, so an absolute count only holds on a fresh
-  // database. Both devices are registered between a single pair of readings —
-  // low_battery only counts devices still 'online', so any earlier device
-  // aging past that threshold mid-measurement would move an unrelated count,
-  // and the narrower the window, the less that can happen.
+  // Asserted by name, not by arithmetic on a global count. Only devices that
+  // are still 'online' are counted, so any earlier run's device crossing the
+  // staleness threshold mid-measurement would move a total this test never
+  // touched — which is exactly the flake an absolute or delta check produced.
   const lowBattery = async () =>
-    ((await json("GET", "/api/overview?fresh=1")).body?.devices?.low_battery ?? 0) as number;
-  const before = await lowBattery();
+    ((await json("GET", "/api/overview?fresh=1")).body?.devices?.low_battery_devices ?? []) as string[];
 
   // iOS simulators report -1 for battery: "no battery telemetry", not "1%".
   const SIM = `smoke-sim-${run}`;
@@ -792,8 +789,8 @@ console.log(`smoke against ${BASE}`);
     schema: 1, kind: "beacon", device_id: SIM,
     beacon: { battery_pct: -1, charging: false, thermal: "nominal" },
   });
-  // A genuinely flat device, so the assertion distinguishes "-1 is ignored"
-  // from "the counter is simply broken".
+  // A genuinely flat device, so the check distinguishes "-1 is ignored" from
+  // "the list is simply empty".
   const FLAT = `smoke-flat-${run}`;
   await json("POST", "/devices/register", { device_id: FLAT, descriptor: { model: "Flat" }, pools: [] });
   await json("POST", "/results", {
@@ -801,12 +798,140 @@ console.log(`smoke against ${BASE}`);
     beacon: { battery_pct: 7, charging: false, thermal: "nominal" },
   });
 
-  const after = await lowBattery();
-  check(
-    "exactly one of a -1 battery and a 7% battery counts as low",
-    after === before + 1,
-    `before=${before} after=${after} (a -1 simulator battery must not count; 7% must)`,
-  );
+  const low = await lowBattery();
+  check("a -1 battery is not counted as low", !low.includes(SIM), JSON.stringify(low));
+  check("a real flat battery is counted as low", low.includes(FLAT), JSON.stringify(low));
+}
+
+// 29b. results views (plan D3)
+{
+  const drain = await json("GET", "/api/results/drain");
+  check("drain view answers", drain.status === 200 && Array.isArray(drain.body?.runs));
+  const soak = await json("GET", "/api/results/soak");
+  check("soak view answers", soak.status === 200 && Array.isArray(soak.body?.runs));
+  const vision = await json("GET", "/api/results/vision");
+  check("vision view answers", vision.status === 200 && Array.isArray(vision.body?.runs));
+  const ui = await json("GET", "/api/results/ui");
+  check("ui view builds a build x device matrix", Array.isArray(ui.body?.matrix) && Array.isArray(ui.body?.devices), JSON.stringify(ui.body?.devices));
+  // The executor's own `host:<name>` summary row is not a device and must not
+  // become a column in the matrix.
+  check("ui matrix excludes the host executor row", !(ui.body?.devices ?? []).some((d: string) => d.startsWith("host:")), JSON.stringify(ui.body?.devices));
+
+  // A device named by the fleet's own simulator convention must be flagged, or
+  // it lands in a hardware comparison.
+  const SIMDEV = `iphone-sim-${run}`;
+  await json("POST", "/devices/register", { device_id: SIMDEV, descriptor: { model: "arm64", os: "ios-18.4" }, pools: [] });
+  const devs = await json("GET", "/api/devices");
+  const simRow = (devs.body?.devices ?? []).find((d: any) => d.device_id === SIMDEV);
+  check("a -sim- device id is detected as a simulator", simRow?.simulator === true, JSON.stringify(simRow?.simulator));
+  const realRow = (devs.body?.devices ?? []).find((d: any) => d.device_id === DEVICE);
+  check("a real device is not mistaken for a simulator", realRow?.simulator === false, JSON.stringify(realRow?.simulator));
+}
+
+// 30. operations (plan D4): schedules, artifacts GC, retention, executors
+{
+  const SCHED2 = `smoke-ops-sched-${run}`;
+  const up = await json("POST", "/api/schedules", {
+    id: SCHED2, cron: "0 3 * * *", enabled: false,
+    template: { schema: 1, workload: "benchmark", executor: "device", backend: "synthetic",
+                targets: { device_id: `smoke-nobody-${run}` } },
+  });
+  check("schedule upserts through the guarded route", up.status === 201, JSON.stringify(up.body));
+  const on = await json("PATCH", `/api/schedules/${SCHED2}`, { enabled: true });
+  check("schedule enables through the guarded route", on.status === 200 && on.body?.enabled === true);
+
+  // Run-now must not consume the cron dedup key, or the schedule would skip
+  // its next real firing.
+  const fired = await json("POST", `/api/schedules/${SCHED2}/run`, {});
+  check("run-now enqueues immediately", fired.status === 201 && String(fired.body?.job_id ?? "").includes("-manual-"), JSON.stringify(fired.body));
+  const after = await json("GET", "/api/schedules");
+  const row = (after.body?.schedules ?? []).find((s: any) => s.id === SCHED2);
+  check("run-now leaves the cron dedup key untouched", row?.last_run === null, JSON.stringify(row?.last_run));
+  await json("POST", `/api/jobs/${fired.body?.job_id}/cancel`, {});
+  check("schedule deletes", (await json("DELETE", `/api/schedules/${SCHED2}`)).status === 200);
+
+  // GC must never offer an artifact a job still points at.
+  const gc = await json("GET", "/api/artifacts/gc-candidates?days=0");
+  const shas = (gc.body?.candidates ?? []).map((c: any) => c.sha256);
+  const bench = await json("GET", `/api/jobs/${BENCH_JOB}`);
+  const modelSha = bench.body?.spec?.model?.sha256;
+  check("gc lists candidates", gc.status === 200 && typeof gc.body?.count === "number", JSON.stringify(gc.body?.count));
+  check("gc never offers a referenced artifact", !shas.includes(modelSha), `${modelSha} was offered for deletion`);
+  const refusal = await json("DELETE", `/api/artifacts/${modelSha}`);
+  check("deleting a referenced artifact is refused", refusal.status === 409, JSON.stringify(refusal.body));
+
+  // Retention defaults to a dry run: the count comes before the deletion.
+  const dry = await json("POST", "/api/system/retention", { beacon_days: 3650, event_days: 3650 });
+  check("retention dry-runs by default", dry.body?.dry_run === true && typeof dry.body?.would_delete?.beacons === "number", JSON.stringify(dry.body));
+  const bad = await json("POST", "/api/system/retention", { beacon_days: 0 });
+  check("retention rejects a zero-day window", bad.status === 400, JSON.stringify(bad.body));
+
+  const sweep = await json("POST", "/api/system/sweep", {});
+  check("sweep runs through the guarded route", sweep.status === 200 && Array.isArray(sweep.body?.requeued));
+
+  // The executor registers itself simply by polling, so this needs no new
+  // endpoint on the executor side.
+  await json("GET", `/executor/next-job?name=smoke-exec-${run}`);
+  const execs = await json("GET", "/api/executors");
+  const mine = (execs.body?.executors ?? []).find((e: any) => e.name === `smoke-exec-${run}`);
+  check("a polling executor is recorded", !!mine, JSON.stringify((execs.body?.executors ?? []).map((e: any) => e.name)));
+  check("a just-polled executor reads as polling", mine?.status === "polling", JSON.stringify(mine));
+}
+
+// 31. alerts (plan D5): fire, dedup, acknowledge, snooze, resolve
+{
+  const BATT = `smoke-alert-batt-${run}`;
+  await json("POST", "/devices/register", { device_id: BATT, descriptor: { model: "AlertTest" }, pools: [] });
+  await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: BATT,
+    beacon: { battery_pct: 6, charging: false, thermal: "nominal" },
+  });
+
+  const tick1 = await json("POST", "/api/alerts/tick", {});
+  check("alert tick runs", tick1.status === 200, JSON.stringify(tick1.body));
+  const list1 = await json("GET", "/api/alerts");
+  const batt = (list1.body?.alerts ?? []).find((a: any) => a.rule === "low-battery" && a.subject === BATT);
+  check("a flat device raises a low-battery alert", !!batt, JSON.stringify((list1.body?.alerts ?? []).map((a: any) => a.rule)));
+  check("the failed lease job raises a job-failed alert", (list1.body?.alerts ?? []).some((a: any) => a.rule === "job-failed" && a.subject === LEASE_JOB));
+  check("alerts report whether a webhook exists", typeof list1.body?.webhook === "boolean");
+  // The Schedules page and the alert rule must call the same schedule late at
+  // the same moment, or the banner stays silent while another screen says
+  // something is wrong.
+  const sysThresh = (await json("GET", "/api/alerts")).body?.thresholds?.scheduleLateS;
+  check("the missed-schedule threshold is shared, not duplicated", sysThresh === 300, JSON.stringify(sysThresh));
+
+  // A condition that stays true is one alert, not one per tick — the whole
+  // point of storing alerts as state.
+  await json("POST", "/api/alerts/tick", {});
+  const list2 = await json("GET", "/api/alerts");
+  const same = (list2.body?.alerts ?? []).filter((a: any) => a.rule === "low-battery" && a.subject === BATT);
+  check("a persisting condition does not duplicate", same.length === 1, `${same.length} rows`);
+  check("but it does count the sightings", (same[0]?.seen_count ?? 0) >= 2, JSON.stringify(same[0]?.seen_count));
+
+  const acked = await json("POST", `/api/alerts/${batt.id}/ack`, {});
+  check("alert acknowledges", acked.status === 200 && acked.body?.state === "acked", JSON.stringify(acked.body));
+  const list3 = await json("GET", "/api/alerts");
+  const stillThere = (list3.body?.alerts ?? []).find((a: any) => a.id === batt.id);
+  check("an acknowledged alert stays listed", stillThere?.state === "acked", JSON.stringify(stillThere?.state));
+
+  const jobAlert = (list3.body?.alerts ?? []).find((a: any) => a.rule === "job-failed");
+  const snoozed = await json("POST", `/api/alerts/${jobAlert.id}/snooze`, { minutes: 30 });
+  check("alert snoozes", snoozed.status === 200 && snoozed.body?.state === "snoozed", JSON.stringify(snoozed.body));
+  check("snooze rejects a zero window", (await json("POST", `/api/alerts/${jobAlert.id}/snooze`, { minutes: 0 })).status === 400);
+
+  // The condition clearing is the only thing that resolves an alert.
+  await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: BATT,
+    beacon: { battery_pct: 90, charging: true, thermal: "nominal" },
+  });
+  await json("POST", "/api/alerts/tick", {});
+  const list4 = await json("GET", "/api/alerts?state=open,acked,snoozed,resolved");
+  const resolved = (list4.body?.alerts ?? []).find((a: any) => a.id === batt.id);
+  check("charging the device resolves its alert", resolved?.state === "resolved", JSON.stringify(resolved?.state));
+  check("the resolved alert keeps its history", !!resolved?.first_seen && !!resolved?.resolved_at, JSON.stringify(resolved));
+  const openOnly = await json("GET", "/api/alerts?state=open");
+  check("resolved alerts drop out of the open list", !(openOnly.body?.alerts ?? []).some((a: any) => a.id === batt.id));
+  check("acking an unknown alert 404s", (await json("POST", "/api/alerts/999999/ack", {})).status === 404);
 }
 
 // 29. the legacy dashboard's own links still resolve to legacy pages

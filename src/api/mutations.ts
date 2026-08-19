@@ -5,10 +5,13 @@
 // duplicate-id 409 are non-trivial and must not have two implementations that
 // can drift.
 import type { FastifyInstance } from "fastify";
+import { unlink } from "node:fs/promises";
+import path from "node:path";
+import { ARTIFACT_DIR } from "../config.js";
 import { db } from "../db.js";
 import { isValidMatch } from "../match.js";
 import { requireToken } from "./guard.js";
-import { iso, parse } from "./shared.js";
+import { iso, parse, sha256Refs } from "./shared.js";
 
 type Announce = (event: { type: string; [k: string]: unknown }) => void;
 type MatchingDevices = (pool?: string, match?: string) => { device_id: string; pools: string; pools_override: string | null; descriptor: string }[];
@@ -238,6 +241,188 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
     ).run(b.id, b.name ?? null, JSON.stringify(b.spec));
     announce({ type: "template", id: b.id, event: "upsert" });
     return reply.code(201).send({ ok: true, id: b.id });
+  });
+
+  // --- schedules (plan D4) ---
+
+  for (const [method, path] of [
+    ["POST", "/api/schedules"],
+    ["PATCH", "/api/schedules/:id"],
+    ["DELETE", "/api/schedules/:id"],
+  ] as const) {
+    const handler = async (req: any, reply: any) => {
+      if (!requireToken(req, reply)) return;
+      // Forwarded to the long-standing /schedules routes rather than
+      // reimplemented: cron validation and the no-job_id rule live there.
+      const id = req.params?.id ? `/${encodeURIComponent(req.params.id)}` : "";
+      const res = await app.inject({ method, url: `/schedules${id}`, payload: req.body as object });
+      return reply.code(res.statusCode).send(res.statusCode === 204 ? null : res.json());
+    };
+    if (method === "POST") app.post(path, handler);
+    else if (method === "PATCH") app.patch(path, handler);
+    else app.delete(path, handler);
+  }
+
+  /** Fire one schedule now, without waiting for its cron minute and without
+   *  disturbing the dedup key that stops it double-firing on its own. */
+  app.post("/api/schedules/:id/run", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { id } = req.params as { id: string };
+    const row = db.prepare("SELECT template FROM schedules WHERE id = ?").get(id) as { template: string } | undefined;
+    if (!row) return reply.code(404).send({ error: "not found" });
+
+    // Suffixed with 'manual' so a hand-fired run is never mistaken for the
+    // scheduler's own, and cannot collide with the minute-keyed id it uses.
+    const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
+    const jobId = `${id}-manual-${stamp}`;
+    const res = await app.inject({
+      method: "POST",
+      url: "/jobs",
+      payload: { ...parse<Record<string, unknown>>(row.template, {}), job_id: jobId },
+    });
+    if (res.statusCode !== 201) return reply.code(res.statusCode).send({ error: `enqueue failed: ${res.body}` });
+    return reply.code(201).send({ ok: true, ...(res.json() as Record<string, unknown>), schedule: id });
+  });
+
+  // --- alerts (plan D5) ---
+
+  app.post("/api/alerts/:id/ack", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { id } = req.params as { id: string };
+    // Acknowledged, not resolved: the condition is still true and the alert
+    // stays visible. Only the condition clearing resolves it.
+    const changed = db
+      .prepare("UPDATE alerts SET state = 'acked' WHERE id = ? AND state != 'resolved'")
+      .run(Number(id)).changes;
+    if (!changed) return reply.code(404).send({ error: "no open alert with that id" });
+    announce({ type: "alert", id: Number(id), event: "ack" });
+    return { ok: true, id: Number(id), state: "acked" };
+  });
+
+  app.post("/api/alerts/:id/snooze", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { id } = req.params as { id: string };
+    const minutes = Number((req.body as { minutes?: number } | null)?.minutes ?? 60);
+    if (!Number.isFinite(minutes) || minutes < 1) return reply.code(400).send({ error: "minutes must be >= 1" });
+
+    const changed = db
+      .prepare(
+        `UPDATE alerts SET state = 'snoozed', snooze_until = datetime('now', ?)
+         WHERE id = ? AND state != 'resolved'`,
+      )
+      .run(`+${Math.round(minutes)} minutes`, Number(id)).changes;
+    if (!changed) return reply.code(404).send({ error: "no open alert with that id" });
+    announce({ type: "alert", id: Number(id), event: "snooze" });
+    return { ok: true, id: Number(id), state: "snoozed", minutes };
+  });
+
+  // --- artifacts (plan D4) ---
+
+  /** Artifacts no job spec or result references. The candidates are listed
+   *  before anything is deleted, because a hash the dashboard cannot see a
+   *  reference to may still be referenced by something it never indexed. */
+  function gcCandidates(olderThanDays: number) {
+    const referenced = new Set<string>();
+    for (const { blob } of [
+      ...(db.prepare("SELECT spec AS blob FROM jobs").all() as { blob: string }[]),
+      ...(db.prepare("SELECT payload AS blob FROM results").all() as { blob: string }[]),
+      ...(db.prepare("SELECT template AS blob FROM schedules").all() as { blob: string }[]),
+      ...(db.prepare("SELECT spec AS blob FROM job_templates").all() as { blob: string }[]),
+    ]) {
+      for (const sha of sha256Refs(blob)) referenced.add(sha);
+    }
+    return (
+      db
+        .prepare(
+          `SELECT sha256, name, size, created_at FROM artifacts
+           WHERE created_at <= datetime('now', ?) ORDER BY size DESC`,
+        )
+        .all(`-${olderThanDays} days`) as { sha256: string; name: string | null; size: number; created_at: string }[]
+    )
+      .filter((a) => !referenced.has(a.sha256))
+      .map((a) => ({ ...a, created_at: iso(a.created_at) }));
+  }
+
+  app.get("/api/artifacts/gc-candidates", async (req) => {
+    const days = Math.max(0, Number((req.query as Record<string, string>).days ?? 30) || 30);
+    const candidates = gcCandidates(days);
+    return {
+      days,
+      count: candidates.length,
+      bytes: candidates.reduce((a, c) => a + c.size, 0),
+      candidates: candidates.slice(0, 500),
+    };
+  });
+
+  app.delete("/api/artifacts/:sha256", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { sha256 } = req.params as { sha256: string };
+    if (!/^[a-f0-9]{64}$/.test(sha256)) return reply.code(400).send({ error: "bad sha256" });
+
+    // Refuse while anything still points at it. An artifact is content, not a
+    // cache entry: deleting one a queued job needs makes that job fail at
+    // download time, long after the click that caused it.
+    const referencedBy = (
+      db.prepare("SELECT job_id, spec FROM jobs").all() as { job_id: string; spec: string }[]
+    ).filter((j) => j.spec.includes(sha256));
+    if (referencedBy.length > 0)
+      return reply
+        .code(409)
+        .send({ error: `still referenced by ${referencedBy.length} job(s), e.g. ${referencedBy[0].job_id}` });
+
+    const removed = db.prepare("DELETE FROM artifacts WHERE sha256 = ?").run(sha256).changes;
+    if (!removed) return reply.code(404).send({ error: "not found" });
+    await unlink(path.join(ARTIFACT_DIR, sha256)).catch(() => {});
+    announce({ type: "artifact", sha256, event: "delete" });
+    return { ok: true, sha256 };
+  });
+
+  // --- system (plan D4) ---
+
+  app.post("/api/system/sweep", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const res = await app.inject({ method: "POST", url: "/jobs/sweep" });
+    return reply.code(res.statusCode).send(res.json());
+  });
+
+  app.post("/api/system/scheduler-tick", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const res = await app.inject({ method: "POST", url: "/schedules/tick" });
+    return reply.code(res.statusCode).send(res.json());
+  });
+
+  app.post("/api/power/:pool/:state", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { pool, state } = req.params as { pool: string; state: string };
+    const res = await app.inject({ method: "POST", url: `/power/${encodeURIComponent(pool)}/${encodeURIComponent(state)}` });
+    return reply.code(res.statusCode).send(res.json());
+  });
+
+  /**
+   * Retention. A 60 s beacon is ~1.4k rows per device per day, so the table
+   * that powers the battery charts is also the one that grows without bound.
+   * Deliberately manual: a nightly job that silently deletes measurements is a
+   * worse default than a button someone presses.
+   */
+  app.post("/api/system/retention", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const b = (req.body ?? {}) as { beacon_days?: number; event_days?: number; dry_run?: boolean };
+    const beaconDays = Number(b.beacon_days ?? 30);
+    const eventDays = Number(b.event_days ?? 30);
+    if (!Number.isFinite(beaconDays) || beaconDays < 1 || !Number.isFinite(eventDays) || eventDays < 1)
+      return reply.code(400).send({ error: "beacon_days and event_days must be >= 1" });
+
+    const countBeacons = db.prepare("SELECT COUNT(*) AS n FROM beacon_samples WHERE ts <= datetime('now', ?)");
+    const countEvents = db.prepare("SELECT COUNT(*) AS n FROM events WHERE created_at <= datetime('now', ?)");
+    const beacons = (countBeacons.get(`-${beaconDays} days`) as { n: number }).n;
+    const events = (countEvents.get(`-${eventDays} days`) as { n: number }).n;
+
+    if (b.dry_run !== false) return { ok: true, dry_run: true, would_delete: { beacons, events } };
+
+    db.prepare("DELETE FROM beacon_samples WHERE ts <= datetime('now', ?)").run(`-${beaconDays} days`);
+    db.prepare("DELETE FROM events WHERE created_at <= datetime('now', ?)").run(`-${eventDays} days`);
+    announce({ type: "retention", beacons, events });
+    return { ok: true, dry_run: false, deleted: { beacons, events } };
   });
 
   app.delete("/api/templates/:id", async (req, reply) => {

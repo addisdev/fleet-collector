@@ -25,7 +25,7 @@
     },
     "metrics": {
       "type": "object",
-      "description": "benchmark metrics; memory is labeled, never laundered",
+      "description": "Workload metrics; memory is labeled, never laundered.\n\nEvery field here means one thing. Before the vision-eval and drain fields existed, those workloads reused the LLM slots — vision put top-1 accuracy in decode_tok_s, p50 latency in ttft_ms and images/sec in prefill_tok_s; drain put percent-per-hour in decode_tok_s — and top-5 and p95 had nowhere to go at all, so they were only ever in the hand-written eval report. Rows predating these fields still carry that convention, and the dashboard marks anything it had to infer that way. New runners must populate the named fields instead.",
       "properties": {
         "load_ms": { "type": "number" },
         "prefill_tok_s": { "type": "number" },
@@ -35,7 +35,14 @@
         "mem_method": { "enum": ["phys_footprint", "pss"] },
         "thermal": { "type": "array", "items": { "enum": ["nominal", "fair", "serious", "critical"] } },
         "battery_start_pct": { "type": "number" },
-        "battery_end_pct": { "type": "number" }
+        "battery_end_pct": { "type": "number" },
+
+        "top1_pct": { "type": "number", "description": "vision-eval: top-1 accuracy over the eval set" },
+        "top5_pct": { "type": "number", "description": "vision-eval: top-5 accuracy over the eval set" },
+        "p50_ms": { "type": "number", "description": "vision-eval: median per-image inference latency" },
+        "p95_ms": { "type": "number", "description": "vision-eval: 95th-percentile per-image inference latency" },
+        "images_per_s": { "type": "number", "description": "vision-eval: throughput" },
+        "drain_pct_per_h": { "type": "number", "description": "drain: battery percent consumed per hour" }
       }
     },
     "artifacts": {

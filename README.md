@@ -159,19 +159,37 @@ Building the dashboard is what `dash:build` does; `dash:dev` runs Vite's dev
 server on :5178 and proxies `/api` to `FLEET_URL` (default `127.0.0.1:8788`), so
 you can develop the UI against the live fleet without a mock.
 
-**What is built (plan D0–D2):** the read API, the live event stream, and the
+**What is built (plan D0–D6 — the dashboard plan is complete):** the read API, the live event stream, and the
 Overview, Devices, Jobs, Schedules and System screens — including device detail
 with a 24 h battery/thermal chart, job detail with per-device results and
 artifacts, and filters that live in the URL so a filtered view is a link you can
 send. Jobs can be composed, enqueued, cancelled, retried and reprioritised from
-the browser; devices can be renamed, annotated and re-pooled. Results, Artifacts
-and Events are stubs that name their phase and link the endpoint that already
-backs them.
+the browser; devices can be renamed, annotated and re-pooled. Results has views
+for benchmarks, vision evals, UI tests, drain and soak. Schedules can be
+enabled, fired now and deleted; artifacts can be uploaded and garbage-collected;
+events can be tailed; and the System screen runs sweeps, scheduler ticks, pool
+power and retention. Alerts appear as a banner on every screen. The layout works
+on a phone, and `?` lists the keyboard shortcuts (`g j` jobs, `g d` devices,
+`g n` new job, `/` search).
 
-The legacy dashboard is **still needed for one thing**: the cross-device
-benchmark comparison at `/dash/legacy/bench`. The SPA shows per-device
-benchmarks on a device page but not the comparison table; that arrives with the
-trend charts in D3, and legacy can go then.
+The legacy dashboard has **no unique feature left** — the cross-device benchmark
+comparison now lives in the SPA — but it is deliberately kept. It is
+server-rendered with no build step, so it is the only dashboard that works from
+a bare checkout or when a bundle fails to build. That, and nothing else, is now
+its job.
+
+### A caveat about vision-eval and drain numbers
+
+Runners that predate `metrics.top1_pct` and friends encode vision-eval results
+in the LLM metric slots — top-1 accuracy in `decode_tok_s`, p50 latency in
+`ttft_ms`, throughput in `prefill_tok_s` — and drain runs put percent-per-hour
+in `decode_tok_s` too. **Top-5 and p95 were never stored anywhere**, which is
+why the published plant-ID report carries numbers the dashboard cannot show.
+
+`schemas/result.schema.json` now defines the named fields. The Results screen
+reads them when present, falls back to the old convention otherwise, and marks
+every value it had to infer. Until the runner apps emit the named fields, the
+vision view supplements the hand-written eval report rather than replacing it.
 
 ### Read API
 
@@ -192,7 +210,10 @@ client to get it wrong. Every list is bounded.
 | `GET /api/jobs/:id` | Spec, results, beacons, artifacts (input vs output, and whether they are actually in the store), locks, fan-out parent/siblings/children, status report |
 | `GET /api/results` | Filters: `job`, `device`, `workload`, `final`, `ok`, `from`, `to` |
 | `GET /api/results/bench` | Latest passing run per device per configuration, with per-device history for trends |
-| `GET /api/results/ui` | Pass/fail per (build, device) for `ui-test` jobs |
+| `GET /api/results/ui` | Per-run verdicts plus a build x device matrix with flaky detection |
+| `GET /api/results/vision` | Vision-eval accuracy and latency per model per device; flags inferred values |
+| `GET /api/results/drain` | Drain runs: battery curve per device and percent-per-hour |
+| `GET /api/results/soak` | Soak runs: the per-check process-alive timeline per device |
 | `GET /api/results/recent` | Newest result rows with a one-line summary |
 | `GET /api/schedules` | Schedules with computed `next_run` and missed-fire detection |
 | `GET /api/artifacts` | Store listing with on-disk state and reference counts |
@@ -218,6 +239,17 @@ in it means the collector restarted and clients should refetch everything.
 | `DELETE /api/devices/:id` | Forget a device; refuses while it is running a job |
 | `POST /api/devices/:id/release-lock` | Drop a stuck host-executor lock |
 | `GET/POST/DELETE /api/templates[/:id]` | Saved job specs for the composer |
+| `POST/PATCH/DELETE /api/schedules[/:id]` | Upsert, enable/disable, delete — forwarded to the `/schedules` routes |
+| `POST /api/schedules/:id/run` | Fire one schedule now, without consuming its cron dedup key |
+| `GET /api/artifacts/gc-candidates?days=` | Artifacts nothing references, oldest first |
+| `DELETE /api/artifacts/:sha256` | Delete one; refuses while a job still references it |
+| `POST /api/system/sweep`, `POST /api/system/scheduler-tick` | Force a pass now |
+| `POST /api/power/:pool/:state` | Fire a pool's smart-plug webhook |
+| `POST /api/system/retention` | Prune old beacons and events; dry-runs unless `dry_run:false` |
+| `GET /api/executors` | Host-executor liveness, derived from their long-poll traffic |
+| `GET /api/alerts?state=` | Current alerts; `open,acked,snoozed` unless asked otherwise |
+| `POST /api/alerts/:id/ack`, `POST /api/alerts/:id/snooze` | Quiet one alert; snooze takes `minutes` |
+| `POST /api/alerts/tick` | Force an evaluation now |
 
 **Cancelling a claimed job** does not reach into the device. The row goes to
 `cancelled`, which means the runner's next beacon returns `lease_renewed: false`
@@ -238,6 +270,36 @@ browser's localStorage). Unset, the default, leaves mutations open exactly as
 before. This is a speed bump, not authentication — `POST /jobs` stays open for
 CI and curl, so anyone who can reach the collector can still enqueue. What the
 token buys is that a stray tab or misfired script cannot *cancel* or *delete*.
+
+## Alerts
+
+Evaluated every 60 s (`FLEET_ALERT_TICK_MS`). Alerts are **state, not events**:
+one row per (rule, subject) for as long as the condition holds, resolved when it
+stops. A device offline for six hours is one row with a rising `seen_count`, not
+360 notifications — and nothing is notified twice, ever.
+
+| Rule | Fires when |
+|---|---|
+| `device-offline` | no check-in for `FLEET_ALERT_DEVICE_OFFLINE_S` (default 15 min) |
+| `thermal-critical` | a device still reporting is thermally critical |
+| `low-battery` | below `FLEET_ALERT_LOW_BATTERY_PCT` (default 15) and not charging |
+| `job-failed` | a job failed in the last 24 h |
+| `job-stuck` | claimed, lease still being renewed, but no result rows after 2× the lease TTL |
+| `schedule-missed` | an enabled schedule that has run before missed its firing by 5 min |
+| `db-size` / `log-size` | past `FLEET_ALERT_DB_BYTES` / `FLEET_ALERT_LOG_BYTES` |
+
+`job-stuck` is the case the lease sweep cannot see: beacons keep renewing the
+claim, so the job never lapses, and without this rule a runner that is alive but
+producing nothing looks identical to one that is working.
+
+Battery and thermal are only judged on devices still checking in — a reading
+from a silent device describes whenever it went silent, not now. And a device
+reporting `-1` has no battery telemetry rather than a flat one.
+
+Set `FLEET_ALERT_WEBHOOK` to push newly opened alerts to ntfy or any webhook
+receiver; unset (the default) makes the dashboard the only channel. Acknowledge
+keeps an alert listed but stops it nagging; snooze quiets it for N minutes and it
+returns on its own. Only the condition clearing resolves an alert.
 
 ## Leases
 

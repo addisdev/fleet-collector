@@ -14,6 +14,7 @@ import {
   SWEEP_MS,
 } from "../config.js";
 import { minuteKey, nextRun, prevRun } from "../cron.js";
+import { THRESHOLDS, webhookConfigured } from "../alerts.js";
 import { guardEnabled } from "./guard.js";
 import { AGE, iso, paging, parse, sha256Refs, tableCounts } from "./shared.js";
 import { clientCount, SERVER_INSTANCE, STARTED_AT } from "./stream.js";
@@ -92,7 +93,9 @@ export function schedulesView(now = new Date()) {
       prev != null &&
       s.last_run != null &&
       s.last_run !== minuteKey(prev) &&
-      now.getTime() - prev.getTime() > 120_000;
+      // Same threshold the schedule-missed alert uses, so this page and the
+      // alert banner can never disagree about whether a schedule is late.
+      now.getTime() - prev.getTime() > THRESHOLDS.scheduleLateS * 1000;
     const template = parse<Record<string, any>>(s.template, {});
     return {
       id: s.id,
@@ -152,6 +155,58 @@ export function registerSystem(app: FastifyInstance) {
   });
 
   app.get("/api/schedules", async () => ({ schedules: schedulesView() }));
+
+  app.get("/api/alerts", async (req) => {
+    const q = req.query as Record<string, string | undefined>;
+    // Open by default: resolved history is available but is not what a banner
+    // or a glance at the shelf is asking about.
+    const states = (q.state ?? "open,acked,snoozed").split(",").filter(Boolean);
+    const rows = db
+      .prepare(
+        `SELECT *, ${AGE("first_seen")} AS age_s FROM alerts
+         WHERE state IN (${states.map(() => "?").join(",")})
+         ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END, last_seen DESC LIMIT 200`,
+      )
+      .all(...states) as (Record<string, unknown> & { first_seen: string; last_seen: string; resolved_at: string | null; snooze_until: string | null })[];
+
+    return {
+      alerts: rows.map((a) => ({
+        ...a,
+        notified: !!a.notified,
+        first_seen: iso(a.first_seen),
+        last_seen: iso(a.last_seen),
+        resolved_at: iso(a.resolved_at),
+        snooze_until: iso(a.snooze_until),
+      })),
+      counts: Object.fromEntries(
+        (db.prepare("SELECT state, COUNT(*) AS n FROM alerts GROUP BY state").all() as { state: string; n: number }[]).map(
+          (r) => [r.state, r.n],
+        ),
+      ),
+      // So the UI can say whether anything beyond the dashboard will hear it.
+      webhook: webhookConfigured(),
+      thresholds: THRESHOLDS,
+    };
+  });
+
+  // Host-executor liveness, derived from their long-poll traffic. A host job
+  // queued behind a dead executor is indistinguishable from a slow one without
+  // this.
+  app.get("/api/executors", async () => ({
+    executors: (
+      db
+        .prepare(`SELECT name, last_seen, last_job, polls, ${AGE("last_seen")} AS age_s FROM executors ORDER BY last_seen DESC`)
+        .all() as { name: string; last_seen: string; last_job: string | null; polls: number; age_s: number }[]
+    ).map((e) => ({
+      ...e,
+      last_seen: iso(e.last_seen),
+      // The long poll is ~25 s, so a healthy executor is never quiet for long.
+      status: e.age_s <= 90 ? "polling" : e.age_s <= 600 ? "quiet" : "gone",
+    })),
+    queued_host_jobs: (
+      db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued' AND executor = 'host'").get() as { n: number }
+    ).n,
+  }));
 
   app.get("/api/status-reports", async () => ({
     reports: (

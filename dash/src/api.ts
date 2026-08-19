@@ -159,6 +159,7 @@ export type Overview = {
     idle: number;
     charging: number;
     low_battery: number;
+    low_battery_devices: string[];
     worst_thermal: string | null;
     by_pool: Record<string, number>;
   };

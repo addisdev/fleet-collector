@@ -34,7 +34,9 @@ function build() {
   const byStatus = { online: 0, stale: 0, offline: 0 };
   const byPool: Record<string, number> = {};
   let charging = 0;
-  let lowBattery = 0;
+  // Named, not just counted: "1 device below 15%" makes you go looking, and a
+  // bare count cannot be checked against anything.
+  const lowBatteryDevices: string[] = [];
   const thermals: (string | null)[] = [];
   for (const d of deviceRows) {
     const status = deviceStatus(d.age_s);
@@ -46,7 +48,8 @@ function build() {
     // reading is a snapshot of whenever the device stopped talking.
     if (status === "online") {
       thermals.push(b?.thermal ?? null);
-      if (hasBattery(b?.battery_pct) && b!.battery_pct! < 15 && b?.charging === false) lowBattery++;
+      if (hasBattery(b?.battery_pct) && b!.battery_pct! < 15 && b?.charging === false)
+        lowBatteryDevices.push(d.device_id);
     }
   }
 
@@ -123,7 +126,8 @@ function build() {
       busy: deviceRows.filter((d) => busy.has(d.device_id)).length,
       idle: deviceRows.filter((d) => !busy.has(d.device_id) && deviceStatus(d.age_s) === "online").length,
       charging,
-      low_battery: lowBattery,
+      low_battery: lowBatteryDevices.length,
+      low_battery_devices: lowBatteryDevices,
       worst_thermal: worstThermal(thermals),
       by_pool: byPool,
     },

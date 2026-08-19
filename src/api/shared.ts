@@ -91,7 +91,12 @@ export function isSimulator(descriptor: Record<string, unknown>, deviceId: strin
   const hay = `${deviceId} ${String(descriptor.model ?? "")} ${String(descriptor.os ?? "")} ${String(
     descriptor.soc ?? "",
   )}`.toLowerCase();
-  return /simulator|emulator|sdk_gphone|goldfish|ranchu|x86_64/.test(hay);
+  // `[-_]sim[-_]` catches the fleet's own naming (iphone-sim-0000), which
+  // "simulator" alone misses — and a simulator that slips through this check
+  // lands in a hardware comparison table, which is the one thing the flag
+  // exists to prevent. Delimited so it cannot fire on a word merely
+  // containing "sim".
+  return /simulator|emulator|sdk_gphone|goldfish|ranchu|x86_64|[-_]sim[-_]|[-_]sim$/.test(hay);
 }
 
 export type Paging = { page: number; per_page: number; offset: number };
