@@ -26,18 +26,30 @@ const bytesOf = (file: string) => {
   }
 };
 
+// A stat per file is cheap, but not unbounded: this runs on a 2016 MacBook
+// whose real job is serving long-polls. Past the cap the page says so rather
+// than quietly reporting a total that covers part of the directory.
+const SCAN_CAP = 20_000;
+
 /** Size of the artifact store on disk, not the sum of the `size` column: a
  *  file left behind by an interrupted upload counts against the disk even
- *  though no row references it. Bounded so a huge store cannot stall a request. */
+ *  though no row references it. */
 function artifactDiskUsage() {
   try {
     const names = readdirSync(ARTIFACT_DIR);
-    const capped = names.slice(0, 5000);
+    const scanned = names.slice(0, SCAN_CAP);
     let bytes = 0;
-    for (const n of capped) bytes += bytesOf(path.join(ARTIFACT_DIR, n));
-    return { files: names.length, bytes, truncated: names.length > capped.length };
+    for (const n of scanned) bytes += bytesOf(path.join(ARTIFACT_DIR, n));
+    return {
+      files: names.length,
+      // How many of those `files` the byte total actually covers. Equal to
+      // files in every normal case; smaller means `bytes` is a floor.
+      scanned: scanned.length,
+      bytes,
+      truncated: names.length > scanned.length,
+    };
   } catch {
-    return { files: 0, bytes: 0, truncated: false };
+    return { files: 0, scanned: 0, bytes: 0, truncated: false };
   }
 }
 

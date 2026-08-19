@@ -66,6 +66,11 @@ export function worstThermal(states: (string | null | undefined)[]): string | nu
 /** The beacon payload the runners post is `{schema, kind, device_id, beacon:{…}}`.
  *  Older rows and host-driven beacons put the fields at the top level, so read
  *  through both shapes rather than trusting one. */
+/** A device with no battery telemetry reports -1, not a low charge: iOS
+ *  simulators always do, and treating that as "1% left" turns every simulator
+ *  on the shelf into a permanent low-battery alert. */
+export const hasBattery = (pct: number | null | undefined): pct is number => typeof pct === "number" && pct >= 0;
+
 export function beaconFields(sample: Record<string, unknown> | null) {
   if (!sample) return null;
   const b = (sample.beacon ?? sample) as Record<string, unknown>;

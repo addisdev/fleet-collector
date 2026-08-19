@@ -3,7 +3,7 @@
 // collector's real job is serving long-polls to the fleet.
 import type { FastifyInstance } from "fastify";
 import { db } from "../db.js";
-import { AGE, beaconFields, deviceStatus, iso, parse, worstThermal } from "./shared.js";
+import { AGE, beaconFields, deviceStatus, hasBattery, iso, parse, worstThermal } from "./shared.js";
 import { health, schedulesView } from "./system.js";
 
 const CACHE_MS = 2000;
@@ -46,7 +46,7 @@ function build() {
     // reading is a snapshot of whenever the device stopped talking.
     if (status === "online") {
       thermals.push(b?.thermal ?? null);
-      if (b?.battery_pct != null && b.battery_pct < 15 && b.charging === false) lowBattery++;
+      if (hasBattery(b?.battery_pct) && b!.battery_pct! < 15 && b?.charging === false) lowBattery++;
     }
   }
 

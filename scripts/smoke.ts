@@ -752,11 +752,55 @@ console.log(`smoke against ${BASE}`);
   const GONE = `smoke-gone-${run}`;
   await json("POST", "/devices/register", { device_id: GONE, descriptor: { model: "Gone" }, pools: [] });
   await json("POST", "/results", { schema: 1, kind: "beacon", device_id: GONE, beacon: { battery_pct: 50, charging: false, thermal: "nominal" } });
+  // A host-executor job is claimed by the executor, not the device, so only the
+  // lock reveals that this device is mid-test. Deleting it anyway would drop
+  // the lock and let the device's own agent start work on top of a running
+  // UI test.
+  await json("POST", "/locks/acquire", { job_id: `smoke-holding-${run}`, device_ids: [GONE] });
+  const busy = await json("DELETE", `/api/devices/${GONE}`);
+  check("forgetting a host-locked device is refused", busy.status === 409, JSON.stringify(busy.body));
+  check("still locked after the refusal", (await json("GET", "/api/locks")).body?.locks?.some((l: any) => l.device_id === GONE));
+  await json("POST", "/locks/release", { job_id: `smoke-holding-${run}` });
+
   const del = await json("DELETE", `/api/devices/${GONE}`);
-  check("device forgotten", del.status === 200, JSON.stringify(del.body));
+  check("device forgotten once the lock is gone", del.status === 200, JSON.stringify(del.body));
   check("forgetting an unknown device 404s", (await json("DELETE", `/api/devices/${GONE}`)).status === 404);
   const beacons = await json("GET", `/api/devices/${GONE}/beacons`);
   check("beacon history survives the device row", (beacons.body?.samples ?? []).length >= 1, JSON.stringify(beacons.body?.count));
+}
+
+// 28. a device with no battery telemetry is not a low battery
+{
+  // iOS simulators report -1 for battery. Counting that as "below 15%" would
+  // make every simulator on the shelf a permanent low-battery alert.
+  const SIM = `smoke-sim-${run}`;
+  await json("POST", "/devices/register", { device_id: SIM, descriptor: { model: "iPhone 16 Simulator", os: "ios-18.4" }, pools: [] });
+  await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: SIM,
+    beacon: { battery_pct: -1, charging: false, thermal: "nominal" },
+  });
+  const ov = await json("GET", "/api/overview?fresh=1");
+  check("a -1 battery is not counted as low", (ov.body?.devices?.low_battery ?? 0) === 0, JSON.stringify(ov.body?.devices));
+
+  // A genuinely flat device still counts.
+  const FLAT = `smoke-flat-${run}`;
+  await json("POST", "/devices/register", { device_id: FLAT, descriptor: { model: "Flat" }, pools: [] });
+  await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: FLAT,
+    beacon: { battery_pct: 7, charging: false, thermal: "nominal" },
+  });
+  const ov2 = await json("GET", "/api/overview?fresh=1");
+  check("a real flat battery is still counted", (ov2.body?.devices?.low_battery ?? 0) === 1, JSON.stringify(ov2.body?.devices));
+}
+
+// 29. the legacy dashboard's own links still resolve to legacy pages
+{
+  const html = await (await fetch(`${BASE}/dash/legacy`)).text();
+  // The whole point of legacy is that it works when the SPA is not built, so a
+  // link from it into the SPA shell would strand the operator.
+  check("legacy links to the legacy bench page", html.includes('href="/dash/legacy/bench"'), "legacy dash links off to a removed route");
+  const bench = await (await fetch(`${BASE}/dash/legacy/bench`)).text();
+  check("legacy bench links back to the legacy dash", bench.includes('href="/dash/legacy"'));
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

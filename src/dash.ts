@@ -71,7 +71,7 @@ export function renderBench(): string {
 <html><head><meta charset="utf-8"><title>Fleet Benchmarks</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>${SHARED_CSS}</style></head><body>
-<h1>Fleet Benchmarks <a href="/dash" style="font-size:0.8rem">← dashboard</a></h1>
+<h1>Fleet Benchmarks <a href="/dash/legacy" style="font-size:0.8rem">← dashboard</a></h1>
 <p style="color:#7a828e;font-size:0.85rem">Latest passing run per device per configuration, fastest decode first. Memory methods differ by platform and are never comparable across them.</p>
 ${sections || "<p>No benchmark results yet.</p>"}
 </body></html>`;
@@ -155,7 +155,7 @@ export function renderDash(): string {
 <html><head><meta charset="utf-8"><title>Fleet Collector</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>${SHARED_CSS}</style></head><body>
-<h1>Fleet Collector <a href="/dash/bench" style="font-size:0.8rem">benchmarks →</a></h1>
+<h1>Fleet Collector <a href="/dash/legacy/bench" style="font-size:0.8rem">benchmarks →</a></h1>
 <h2>Devices (${devices.length})</h2>
 <table><tr><th>ID</th><th>Hardware</th><th>Pools</th><th>Battery</th><th>Thermal</th><th>Last seen</th></tr>${deviceRows}</table>
 <h2>Jobs</h2>

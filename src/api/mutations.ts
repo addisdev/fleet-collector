@@ -176,6 +176,19 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
     if (claimed)
       return reply.code(409).send({ error: `device is running ${claimed.job_id}; cancel it first` });
 
+    // A host-executor job is claimed by the *executor* ("mac-mini"), never by
+    // the device it drives, so claimed_by alone cannot see an exclusive ui-test
+    // or drain. Its device lock can: deleting the row below would drop that
+    // lock, and the device's own agent — which only stands down while a lock
+    // exists — would start claiming work on top of the running test.
+    const held = db.prepare("SELECT job_id FROM device_locks WHERE device_id = ?").get(id) as
+      | { job_id: string }
+      | undefined;
+    if (held)
+      return reply
+        .code(409)
+        .send({ error: `device is locked by ${held.job_id}; cancel that job or release the lock first` });
+
     const changed = db.prepare("DELETE FROM devices WHERE device_id = ?").run(id).changes;
     if (!changed) return reply.code(404).send({ error: "unknown device" });
     db.prepare("DELETE FROM device_locks WHERE device_id = ?").run(id);

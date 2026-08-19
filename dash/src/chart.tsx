@@ -129,7 +129,15 @@ const THERMAL = ["nominal", "fair", "serious", "critical"];
 
 /** A horizontal strip of thermal state over time — a curve, not a single
  *  state, which is the whole point of sampling it. */
-export function ThermalStrip({ samples, domain }: { samples: { t: number; thermal: string | null }[]; domain: [number, number] }) {
+export function ThermalStrip({
+  samples,
+  domain,
+  gapMs = 10 * 60 * 1000,
+}: {
+  samples: { t: number; thermal: string | null }[];
+  domain: [number, number];
+  gapMs?: number;
+}) {
   const known = samples.filter((s) => s.thermal && THERMAL.includes(s.thermal));
   if (known.length === 0) return <p class="empty">No thermal samples in this window.</p>;
 
@@ -137,11 +145,14 @@ export function ThermalStrip({ samples, domain }: { samples: { t: number; therma
   const span = Math.max(1, t1 - t0);
   const pct = (t: number) => ((t - t0) / span) * 100;
 
-  // Collapse consecutive equal states into one segment.
+  // Collapse consecutive equal states into one segment — but never across a
+  // reporting gap. Painting straight through hours the device was off would
+  // claim a thermal state nobody measured, which is exactly what the battery
+  // line above refuses to do when it breaks on the same gap.
   const segs: { from: number; to: number; state: string }[] = [];
   for (const s of known) {
     const last = segs[segs.length - 1];
-    if (last && last.state === s.thermal) last.to = s.t;
+    if (last && last.state === s.thermal && s.t - last.to <= gapMs) last.to = s.t;
     else segs.push({ from: s.t, to: s.t, state: s.thermal! });
   }
 

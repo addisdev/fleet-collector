@@ -49,7 +49,7 @@ type SystemData = {
   };
   paths: { data_dir: string; artifact_dir: string; log_file: string; power_config: string };
   db: { files: { file: string; bytes: number }[]; bytes: number; counts: Record<string, number> };
-  artifacts: { files: number; bytes: number; truncated: boolean };
+  artifacts: { files: number; scanned: number; bytes: number; truncated: boolean };
   log: { path: string; exists: boolean; bytes: number };
   intervals: { sweep_ms: number; scheduler_tick_ms: number };
   ci: { armed: boolean; status_flag: boolean; token_present: boolean };
@@ -120,7 +120,7 @@ export function System() {
             <Panel title="Storage">
               <div class="stats">
                 <Stat label="database" value={bytes(d.db.bytes)} />
-                <Stat label="artifacts" value={bytes(d.artifacts.bytes)} />
+                <Stat label={d.artifacts.truncated ? "artifacts (at least)" : "artifacts"} value={bytes(d.artifacts.bytes)} />
                 <Stat label="artifact files" value={d.artifacts.files} />
                 <Stat
                   label="log file"
@@ -128,6 +128,12 @@ export function System() {
                   tone={d.log.bytes > LOG_WARN_BYTES ? "warn" : undefined}
                 />
               </div>
+              {d.artifacts.truncated && (
+                <p class="empty">
+                  The artifact total covers the first {d.artifacts.scanned.toLocaleString()} of{" "}
+                  {d.artifacts.files.toLocaleString()} files — the real figure is larger.
+                </p>
+              )}
               {d.log.bytes > LOG_WARN_BYTES && (
                 <p class="empty">
                   The log is past {bytes(LOG_WARN_BYTES)} and launchd does not rotate it — truncate it by hand.
