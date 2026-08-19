@@ -142,6 +142,9 @@ Job and result shapes are documented in [`schemas/`](schemas/) (`"schema": 1`).
 
 ## Dashboard
 
+The plan this was built from, including what is still outstanding on the runner
+side, is [`docs/dashboard-plan.md`](docs/dashboard-plan.md).
+
 `/dash` is a Preact SPA in [`dash/`](dash/), built by Vite to `dash/dist` and
 served straight from this process — one service, one URL, no CORS. The build is
 **optional**: with no `dash/dist` the collector serves a page telling you to run
