@@ -313,22 +313,19 @@ claims through — are the override when set, otherwise the runner's report; bot
 stay visible in `GET /api/devices`.
 
 **`FLEET_DASH_TOKEN`** guards every mutation above: set it and the dashboard
-must send `X-Fleet-Token` (enter it on the System screen; it is kept in that
-browser's localStorage). Unset, the default, leaves mutations open exactly as
-before. On fleet-host it lives in the installed LaunchAgent, which `chmod 600`
-because it now holds a secret — deploying by rsync does not touch
-`~/Library/LaunchAgents`, so the token survives a redeploy, but reinstalling the
-plist from `deploy/` would drop it. Generate one with:
+must send `X-Fleet-Token`. **It is unset on fleet-host, deliberately.** The
+collector is LAN and tailnet only, `POST /jobs` is open anyway so CI and curl
+keep working, and the token bought protection against a stray tab at the cost of
+a paste in every browser — not a trade worth making on a home network.
 
-```bash
-openssl rand -base64 24 | tr -d '/+=' | cut -c1-32
-```
+Turn it on by adding the variable to the LaunchAgent (there is a commented
+example in [`deploy/`](deploy/)) and restarting. The dashboard notices on its own:
+`/api/health` reports `guard`, and a banner appears asking for the token rather
+than letting an ordinary action fail on it.
 
-Note the device and executor paths (`/devices/:id/next-job`,
-`/executor/next-job`, `POST /results`) are deliberately **not** guarded — the
-fleet must keep running whether or not anyone has a token. This is a speed bump, not authentication — `POST /jobs` stays open for
-CI and curl, so anyone who can reach the collector can still enqueue. What the
-token buys is that a stray tab or misfired script cannot *cancel* or *delete*.
+The device and executor paths (`/devices/:id/next-job`, `/executor/next-job`,
+`POST /results`) are never guarded either way — the fleet has to keep running
+whether or not anyone has a token in a browser.
 
 ## The host executor on fleet-host
 
