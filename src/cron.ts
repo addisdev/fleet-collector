@@ -56,6 +56,30 @@ export function cronMatches(expr: string, date: Date): boolean {
   return fields.every((field, i) => fieldMatches(field, values[i], i));
 }
 
+// Walking minute by minute is the honest way to answer "when next?" for an
+// expression this permissive (day-of-month and day-of-week both matching is a
+// real case), and 7 days of minutes is ~10k cheap comparisons. Schedules rarer
+// than weekly report null rather than making the dashboard scan a year.
+const HORIZON_MINUTES = 7 * 24 * 60;
+
+function walk(expr: string, from: Date, step: 1 | -1): Date | null {
+  if (!isValidCron(expr)) return null;
+  const d = new Date(from.getTime());
+  d.setSeconds(0, 0);
+  for (let i = 0; i < HORIZON_MINUTES; i++) {
+    d.setMinutes(d.getMinutes() + step);
+    if (cronMatches(expr, d)) return new Date(d.getTime());
+  }
+  return null;
+}
+
+/** The next minute at or after `from` when this schedule fires. */
+export const nextRun = (expr: string, from = new Date()) => walk(expr, from, 1);
+
+/** The most recent minute before `from` when it should have fired — what a
+ *  missed-schedule check compares `last_run` against. */
+export const prevRun = (expr: string, from = new Date()) => walk(expr, from, -1);
+
 /** The dedup key: schedules fire at most once per matching minute. */
 export function minuteKey(date: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");

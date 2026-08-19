@@ -8,7 +8,10 @@
     "start": "tsx src/server.ts",
     "dev": "tsx watch src/server.ts",
     "executor": "tsx src/executor.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "dash:install": "npm --prefix dash install",
+    "dash:build": "npm --prefix dash run build",
+    "dash:dev": "npm --prefix dash run dev"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",

@@ -13,6 +13,10 @@ npm install
 npm start          # collector on :8788 (FLEET_PORT to change)
 npm run executor   # host executor: claims host jobs, drives devices via adb + Maestro
 npm run smoke      # end-to-end check against a running collector
+
+npm run dash:install   # one-time: dashboard build deps (vite + preact)
+npm run dash:build     # build the dashboard to dash/dist
+npm run dash:dev       # dashboard dev server on :5178, proxying /api to FLEET_URL
 ```
 
 The host executor (Phase 2) handles `install` (artifact → `adb install` on every
@@ -97,7 +101,9 @@ exists — the plist invokes it directly to avoid depending on a login `PATH`.
 | `POST /power/:pool/:state` | Fire the pool's smart-plug webhook (`on`/`off`) from `power.json` — see `power.example.json` |
 | `POST /events/:topic` | Publish a pipeline event (JSON payload); returns its id |
 | `GET /events/:topic/poll?after=<id>` | Long-poll the next event past the cursor; 204 on expiry |
-| `GET /dash` / `GET /dash/bench` | Dashboard / cross-device benchmark comparison |
+| `GET /dash` | Dashboard SPA (see below) |
+| `GET /dash/legacy` / `GET /dash/legacy/bench` | Server-rendered dashboard / cross-device benchmark comparison |
+| `GET /api/*` | Dashboard read API (see below) |
 
 Batch jobs (`workload: batch`) take `params.input_sha256` (an artifact of
 `{"items": [...]}`), process each item on the device (llama.cpp generates,
@@ -133,6 +139,105 @@ workflow to an app repo, and let its self-hosted runner reach the collector
 over Tailscale. Until then the fleet stays fully disconnected from real CI.
 
 Job and result shapes are documented in [`schemas/`](schemas/) (`"schema": 1`).
+
+## Dashboard
+
+`/dash` is a Preact SPA in [`dash/`](dash/), built by Vite to `dash/dist` and
+served straight from this process — one service, one URL, no CORS. The build is
+**optional**: with no `dash/dist` the collector serves a page telling you to run
+`npm run dash:build`, and everything else keeps working. `dash/dist` is
+gitignored, so a fresh checkout on fleet-host needs `npm run dash:install &&
+npm run dash:build` once (pure-JS deps plus esbuild's per-platform binary — no
+sudo, same as the rest of the stack).
+
+The server-rendered tables that used to be `/dash` still live at
+[`/dash/legacy`](src/dash.ts). They have no build step, so they remain the
+fallback when the bundle is missing or broken. They go away once the SPA reaches
+parity.
+
+Building the dashboard is what `dash:build` does; `dash:dev` runs Vite's dev
+server on :5178 and proxies `/api` to `FLEET_URL` (default `127.0.0.1:8788`), so
+you can develop the UI against the live fleet without a mock.
+
+**What is built (plan D0–D2):** the read API, the live event stream, and the
+Overview, Devices, Jobs, Schedules and System screens — including device detail
+with a 24 h battery/thermal chart, job detail with per-device results and
+artifacts, and filters that live in the URL so a filtered view is a link you can
+send. Jobs can be composed, enqueued, cancelled, retried and reprioritised from
+the browser; devices can be renamed, annotated and re-pooled. Results, Artifacts
+and Events are stubs that name their phase and link the endpoint that already
+backs them.
+
+The legacy dashboard is **still needed for one thing**: the cross-device
+benchmark comparison at `/dash/legacy/bench`. The SPA shows per-device
+benchmarks on a device page but not the comparison table; that arrives with the
+trend charts in D3, and legacy can go then.
+
+### Read API
+
+Every endpoint is `GET` and side-effect free. Timestamps are ISO-8601 **UTC with
+a `Z`** — SQLite stores `YYYY-MM-DD HH:MM:SS` with no zone marker, which
+JavaScript parses as local time, so the API normalizes rather than leaving each
+client to get it wrong. Every list is bounded.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/overview` | Everything the Overview screen needs, in one call (cached 2 s; `?fresh=1` bypasses) |
+| `GET /api/health` | Uptime, node version, collector instance id, connected dashboards |
+| `GET /api/system` | DB/artifact/log sizes, row counts per table, CI armed state, power pools, paths |
+| `GET /api/devices` | Registry with derived `online`/`stale`/`offline`, current job, lock, flattened beacon; filters: `status`, `pool`, `platform`, `simulator`, `q` |
+| `GET /api/devices/:id` | Descriptor, job history, latest benchmarks, counts |
+| `GET /api/devices/:id/beacons?hours=24` | Beacon history for the battery/thermal charts, oldest first |
+| `GET /api/jobs` | Filters: `status`, `workload`, `executor`, `pool`, `device`, `q`, `has_error`, `from`, `to`; `page`/`per_page`, `sort`/`dir`; returns status facets |
+| `GET /api/jobs/:id` | Spec, results, beacons, artifacts (input vs output, and whether they are actually in the store), locks, fan-out parent/siblings/children, status report |
+| `GET /api/results` | Filters: `job`, `device`, `workload`, `final`, `ok`, `from`, `to` |
+| `GET /api/results/bench` | Latest passing run per device per configuration, with per-device history for trends |
+| `GET /api/results/ui` | Pass/fail per (build, device) for `ui-test` jobs |
+| `GET /api/results/recent` | Newest result rows with a one-line summary |
+| `GET /api/schedules` | Schedules with computed `next_run` and missed-fire detection |
+| `GET /api/artifacts` | Store listing with on-disk state and reference counts |
+| `GET /api/events` / `GET /api/events/:topic` | Pipeline topics and their payload tail |
+| `GET /api/locks` | Held device locks and how long they have been held |
+| `GET /api/stream` | SSE: `job`, `device`, `beacon`, `result`, `lock`, `schedule`, `artifact`, `pipeline-event` |
+
+`/api/stream` carries a nudge, not a payload — an event says "this changed" and
+the client refetches. A dropped or duplicated event therefore costs a redundant
+GET, never a wrong screen. The `hello` frame carries an `instance` id; a change
+in it means the collector restarted and clients should refetch everything.
+
+### Mutations
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/jobs` | Enqueue (the composer's path); forwards to `POST /jobs` so validation and fan-out have one implementation |
+| `POST /api/jobs/:id/cancel` | Queued → `cancelled`; claimed → `cancelled` plus lock release |
+| `POST /api/jobs/:id/retry` | Clone the spec under `<id>-r2`, optionally onto a different pool or device |
+| `PATCH /api/jobs/:id` | Set `priority` |
+| `POST /api/jobs/preview-targets` | "N devices match", using the same matcher fan-out uses |
+| `PATCH /api/devices/:id` | Nickname, notes, pool override (`pools: null` clears the override) |
+| `DELETE /api/devices/:id` | Forget a device; refuses while it is running a job |
+| `POST /api/devices/:id/release-lock` | Drop a stuck host-executor lock |
+| `GET/POST/DELETE /api/templates[/:id]` | Saved job specs for the composer |
+
+**Cancelling a claimed job** does not reach into the device. The row goes to
+`cancelled`, which means the runner's next beacon returns `lease_renewed: false`
+— the same signal a swept lease produces, which runners already handle. Work
+already in flight finishes; nothing new starts. A cancelled job is deliberately
+*not* `failed`: the overview's failure counts and every alert built on them
+would otherwise count deliberate stops as breakage.
+
+**Pool edits** are stored in `devices.pools_override`, not in `pools`. The
+runner rewrites `pools` on every registration, so an edit sharing that column
+would be gone within the minute. Effective pools — what the queue actually
+claims through — are the override when set, otherwise the runner's report; both
+stay visible in `GET /api/devices`.
+
+**`FLEET_DASH_TOKEN`** guards every mutation above: set it and the dashboard
+must send `X-Fleet-Token` (enter it on the System screen; it is kept in that
+browser's localStorage). Unset, the default, leaves mutations open exactly as
+before. This is a speed bump, not authentication — `POST /jobs` stays open for
+CI and curl, so anyone who can reach the collector can still enqueue. What the
+token buys is that a stray tab or misfired script cannot *cancel* or *delete*.
 
 ## Leases
 

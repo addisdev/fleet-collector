@@ -1,4 +1,5 @@
 import { db } from "./db.js";
+import { effectivePools } from "./api/shared.js";
 
 const esc = (s: unknown) =>
   String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
@@ -79,7 +80,7 @@ ${sections || "<p>No benchmark results yet.</p>"}
 export function renderDash(): string {
   const devices = db
     .prepare("SELECT * FROM devices ORDER BY last_seen DESC")
-    .all() as { device_id: string; descriptor: string; pools: string; last_seen: string; last_beacon: string | null }[];
+    .all() as { device_id: string; descriptor: string; pools: string; pools_override: string | null; last_seen: string; last_beacon: string | null }[];
   const jobs = db
     .prepare("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 50")
     .all() as { job_id: string; executor: string; workload: string; status: string; created_at: string; claimed_by: string | null; finished_at: string | null; attempts: number; max_attempts: number; lease_deadline: string | null; last_error: string | null }[];
@@ -100,7 +101,7 @@ export function renderDash(): string {
       return `<tr>
         <td><code>${esc(d.device_id)}</code></td>
         <td>${esc(desc.model ?? "?")} · ${esc(desc.os ?? "?")}</td>
-        <td>${esc(JSON.parse(d.pools).join(", "))}</td>
+        <td>${esc(effectivePools(d).join(", "))}</td>
         <td>${beacon?.beacon?.battery_pct != null ? esc(beacon.beacon.battery_pct) + "%" : "—"}</td>
         <td>${esc(beacon?.beacon?.thermal ?? "—")}</td>
         <td>${esc(d.last_seen)}</td>

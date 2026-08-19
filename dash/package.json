@@ -1,0 +1,22 @@
+{
+  "name": "fleet-dash",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fleet Runner dashboard SPA. Built to dash/dist and served by the collector at /dash.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^10.29.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
