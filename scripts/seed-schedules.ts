@@ -32,7 +32,7 @@ const SCHEDULES: Record<string, Schedule> = {
       "executor": "host",
       "app": {
         "name": "fleet-runner",
-        "build": "0.2.0",
+        "build": "0.2.0-a7e3141",
         "sha256": "6f9c91a9aa3940c774d871100ecf411e4f2a5ebd3f90180372d0922db9fd94d5"
       },
       "suite": {

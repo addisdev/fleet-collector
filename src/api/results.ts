@@ -184,7 +184,12 @@ export function registerResults(app: FastifyInstance) {
       .prepare(
         `SELECT r.job_id, r.device_id, r.payload, r.created_at, j.spec
          FROM results r JOIN jobs j ON j.job_id = r.job_id
-         WHERE j.workload = 'ui-test' AND json_extract(r.payload, '$.final') = 1
+         -- Rows that report a test outcome, not rows marked final. The host
+         -- executor posts the per-device verdict WITHOUT final, then a final
+         -- host:<name> summary carrying no test data at all -- so filtering on
+         -- final selected exactly the rows with nothing in them, and every real
+         -- executor-driven run was invisible here.
+         WHERE j.workload = 'ui-test' AND json_extract(r.payload, '$.test') IS NOT NULL
          ORDER BY r.created_at DESC LIMIT 500`,
       )
       .all() as { job_id: string; device_id: string; payload: string; created_at: string; spec: string }[];
