@@ -807,6 +807,28 @@ console.log(`smoke against ${BASE}`);
 {
   const drain = await json("GET", "/api/results/drain");
   check("drain view answers", drain.status === 200 && Array.isArray(drain.body?.runs));
+
+  // A drain run reporting the named field must be read straight, and one using
+  // the old decode_tok_s slot must still be read — but flagged, because a
+  // battery figure stored under a name meaning tokens/second is not a thing to
+  // present as a measurement.
+  const NAMED = `smoke-drain-named-${run}`, LEGACY = `smoke-drain-legacy-${run}`;
+  for (const [id, metrics] of [
+    [NAMED, { battery_start_pct: 90, battery_end_pct: 60, drain_pct_per_h: 15 }],
+    [LEGACY, { battery_start_pct: 90, battery_end_pct: 60, decode_tok_s: 15 }],
+  ] as const) {
+    await json("POST", "/jobs", {
+      schema: 1, job_id: id, workload: "drain", executor: "host",
+      params: { app_id: "com.taylab.fleetrunner" }, targets: { pool: `smoke-unclaimable-${run}` },
+    });
+    await json("POST", "/results", { schema: 1, kind: "result", job_id: id, device_id: DEVICE, iter: 0, ok: true, metrics });
+  }
+  const drain2 = await json("GET", "/api/results/drain");
+  const named = (drain2.body?.runs ?? []).find((r: any) => r.job_id === NAMED)?.devices?.[0];
+  const legacy = (drain2.body?.runs ?? []).find((r: any) => r.job_id === LEGACY)?.devices?.[0];
+  check("drain reads the named field straight", named?.pct_per_h === 15 && named?.pct_per_h_inferred === false, JSON.stringify(named));
+  check("drain still reads a legacy row, but flags it", legacy?.pct_per_h === 15 && legacy?.pct_per_h_inferred === true, JSON.stringify(legacy));
+  for (const id of [NAMED, LEGACY]) await json("POST", `/api/jobs/${id}/cancel`, {});
   const soak = await json("GET", "/api/results/soak");
   check("soak view answers", soak.status === 200 && Array.isArray(soak.body?.runs));
   const vision = await json("GET", "/api/results/vision");

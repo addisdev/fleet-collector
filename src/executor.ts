@@ -533,7 +533,13 @@ async function runDrain(job: Job) {
     const ok = alive.get(t.id) ?? false;
     if (!ok) allOk = false;
     await postResult({ job_id: job.job_id, device_id: t.id, iter: 0, ok,
-      metrics: { battery_start_pct: s, battery_end_pct: e, decode_tok_s: perHour /* %/hour in the numeric slot for the bench page */ },
+      // drain_pct_per_h, not decode_tok_s. This used to ride in the decode slot
+      // "for the bench page" — which never worked: both bench queries filter
+      // workload = 'benchmark', so a drain row could not appear there. All it
+      // achieved was a battery figure stored under a name that means tokens
+      // per second. Historical rows still carry it that way and the dashboard
+      // reads them back, marked as inferred.
+      metrics: { battery_start_pct: s, battery_end_pct: e, drain_pct_per_h: perHour },
       error: ok ? undefined : `${appId} died during the drain run` });
     log(`drain ${appId} on ${t.id}: ${s}% -> ${e}% (${perHour?.toFixed(1) ?? "?"} %/h) ${ok ? "" : "APP DIED"}`);
   }
