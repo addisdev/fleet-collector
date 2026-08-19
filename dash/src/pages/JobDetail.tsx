@@ -217,7 +217,7 @@ export function JobDetail({ id }: { id: string }) {
                           {/* A spec can reference a hash that was never uploaded.
                               That is a real failure mode — the job dies on download —
                               so it is stated rather than hidden. */}
-                          {!a.in_store && <div class="th-critical">not in the store</div>}
+                          {!a.in_store && <div class="text-bad">not in the store</div>}
                         </td>
                         <td class="num">{bytes(a.size)}</td>
                         <td class="wrap-anywhere">

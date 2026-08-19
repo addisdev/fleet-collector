@@ -314,6 +314,12 @@ tr.muted-row td { opacity: 0.6; }
 .th-serious  { background: var(--warn); }
 .th-critical { background: var(--bad); }
 
+/* Text, not a swatch. The .th-* classes above paint the thermal strip's
+   segments and therefore set a background; using one on a run of text turns it
+   into a solid block. These are the ones to use on words. */
+.text-bad  { color: var(--bad); font-weight: 550; }
+.text-warn { color: var(--warn); font-weight: 550; }
+
 .th-text { font-weight: 550; }
 .th-text.th-nominal  { color: var(--ok); background: none; }
 .th-text.th-fair     { color: #9a8c20; background: none; }
@@ -437,3 +443,15 @@ pre.cmd {
   background: var(--panel-2); color: var(--ink); border: 1px solid var(--accent); border-radius: 5px;
 }
 .open-link { font-size: 0.72rem; }
+
+/* The token banner takes the token where you are, rather than sending you to
+   another screen to find the field. */
+.token-banner { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center; justify-content: space-between; }
+.token-form { display: flex; gap: 0.4rem; align-items: center; }
+.token-form input {
+  font: inherit; font-size: 0.82rem; padding: 0.22rem 0.45rem; width: 15rem;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px;
+}
+/* An inline rename error sits beside the still-open input, so a typed name is
+   never thrown away by a failed save. */
+.name-err { font-size: 0.75rem; max-width: 22rem; }

@@ -354,7 +354,7 @@ function UiTests() {
                           )}
                           {/* Same build, same device, different verdicts: nothing
                               changed between those runs except luck. */}
-                          {c.flaky && <div class="th-serious" title={`${c.runs} runs disagreed`}>flaky</div>}
+                          {c.flaky && <div class="text-warn" title={`${c.runs} runs disagreed`}>flaky</div>}
                         </td>
                       ))}
                     </tr>
@@ -389,7 +389,7 @@ function UiTests() {
                         {r.app ?? "?"} {r.build ?? ""}
                       </td>
                       <td class="num">{r.passed ?? "—"}</td>
-                      <td class="num">{r.failed ? <span class="th-critical">{r.failed}</span> : (r.failed ?? "—")}</td>
+                      <td class="num">{r.failed ? <span class="text-bad">{r.failed}</span> : (r.failed ?? "—")}</td>
                       <td>
                         {r.artifacts.length === 0 ? (
                           <span class="faint">none</span>

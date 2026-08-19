@@ -246,7 +246,7 @@ export function Compose() {
                   {preview.count > 0 && (
                     <span class="faint"> {preview.devices.map((x) => x.device_id).join(", ")}</span>
                   )}
-                  {preview.count === 0 && <span class="th-critical"> Nothing would ever claim this job.</span>}
+                  {preview.count === 0 && <span class="text-bad"> Nothing would ever claim this job.</span>}
                 </p>
               ) : null}
             </>
