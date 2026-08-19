@@ -493,7 +493,31 @@ console.log(`smoke against ${BASE}`);
   check("bench config names model, quant and backend", /smoke-model Q4_K_M · llama\.cpp/.test(entry?.config ?? ""), entry?.config);
   check("bench view keeps prefill and decode separate", entry?.latest?.decode_tok_s != null && entry?.latest?.prefill_tok_s != null, JSON.stringify(entry?.latest));
   check("bench view labels the memory method", entry?.latest?.mem_method === "pss", JSON.stringify(entry?.latest));
+  // The host executor posts a ui-test verdict the way it actually does: the
+  // per-device row carries the test outcome and is NOT final, and a separate
+  // host:<name> row is final and carries no test data. Filtering the matrix on
+  // `final` therefore selected exactly the rows with nothing in them, and every
+  // real executor-driven run was invisible.
+  const EXEC_UI = `smoke-exec-ui-${run}`;
+  await json("POST", "/jobs", {
+    schema: 1, job_id: EXEC_UI, workload: "ui-test", executor: "host",
+    app: { name: "fleet-runner", build: "exec-shape" },
+    suite: { kind: "maestro", flows: "fleetrunner/smoke.yaml" },
+    targets: { pool: `smoke-unclaimable-${run}` },
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: EXEC_UI, device_id: DEVICE, iter: 0,
+    ok: true, test: { passed: 3, failed: 0, artifacts: [] },
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: EXEC_UI, device_id: "host:smoke-exec", iter: 0, final: true, ok: true,
+  });
+
   const ui = await json("GET", "/api/results/ui");
+  const execRun = (ui.body?.runs ?? []).find((r: any) => r.job_id === EXEC_UI && r.device_id === DEVICE);
+  check("a non-final per-device verdict still reaches the ui view", !!execRun && execRun.passed === 3, JSON.stringify(execRun));
+  check("the executor's own host: summary is not treated as a device", !(ui.body?.devices ?? []).includes("host:smoke-exec"), JSON.stringify(ui.body?.devices));
+  check("that run appears in the build x device matrix", (ui.body?.matrix ?? []).some((m: any) => m.build.includes("exec-shape") && m.cells.some((c: any) => c.device === DEVICE && c.latest)), "executor-shaped run missing from the matrix");
   check("ui results carry the verdict", (ui.body?.runs ?? []).some((r: any) => r.job_id === UI_JOB && r.ok === false && r.failed === 1));
 
   const sys = await json("GET", "/api/system");
