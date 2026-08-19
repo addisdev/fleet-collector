@@ -31,6 +31,10 @@ const BENCH_JOB = `smoke-bench-${run}`;
 const UI_JOB = `smoke-uitest-${run}`;
 const LEASE_JOB = `smoke-lease-${run}`;
 const DRAIN_JOB = `smoke-drain-${run}`;
+// Scoped to this run: a fixed pool name accumulates devices from every previous
+// run against the same collector, and the match/fan-out sections assert on how
+// many devices a pool holds.
+const MATCH_POOL = `smoke-match-pool-${run}`;
 
 console.log(`smoke against ${BASE}`);
 
@@ -375,19 +379,19 @@ console.log(`smoke against ${BASE}`);
 // 17. targets.match: descriptor expressions gate claims and fan-out
 {
   const BIG = `smoke-big-${run}`, SMALL = `smoke-small-${run}`;
-  await json("POST", "/devices/register", { device_id: BIG, descriptor: { model: "Big", ram_mb: 8000, os: "android-14" }, pools: ["match-pool"] });
-  await json("POST", "/devices/register", { device_id: SMALL, descriptor: { model: "Small", ram_mb: 2000, os: "android-11" }, pools: ["match-pool"] });
+  await json("POST", "/devices/register", { device_id: BIG, descriptor: { model: "Big", ram_mb: 8000, os: "android-14" }, pools: [MATCH_POOL] });
+  await json("POST", "/devices/register", { device_id: SMALL, descriptor: { model: "Small", ram_mb: 2000, os: "android-11" }, pools: [MATCH_POOL] });
   const bad = await json("POST", "/jobs", { schema: 1, job_id: `smoke-match-bad-${run}`, workload: "benchmark", executor: "device", targets: { match: "ram_mb >>> 4" } });
   check("invalid match expression rejected", bad.status === 400, JSON.stringify(bad.body));
   const fan = await json("POST", "/jobs", {
     schema: 1, job_id: `smoke-match-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
-    fanout: true, targets: { pool: "match-pool", match: "ram_mb >= 4000 && os ~ 'android'" },
+    fanout: true, targets: { pool: MATCH_POOL, match: "ram_mb >= 4000 && os ~ 'android'" },
   });
   const kids = (fan.body?.fanout ?? []) as string[];
   check("fanout honors match (only the big device)", kids.length === 1 && kids[0].endsWith(BIG), JSON.stringify(fan.body));
   await json("POST", "/jobs", {
     schema: 1, job_id: `smoke-match-claim-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
-    targets: { pool: "match-pool", match: "ram_mb < 3000" },
+    targets: { pool: MATCH_POOL, match: "ram_mb < 3000" },
   });
   const bigClaim = await json("GET", `/devices/${BIG}/next-job`);
   check("big device claims only its fanout child, not the <3000 job", bigClaim.status === 200 && bigClaim.body?.job_id === kids[0], JSON.stringify(bigClaim.body));
@@ -668,7 +672,7 @@ console.log(`smoke against ${BASE}`);
 
 // 24. target preview agrees with what fan-out actually does
 {
-  const pv = await json("POST", "/api/jobs/preview-targets", { targets: { pool: "match-pool", match: "ram_mb >= 4000" } });
+  const pv = await json("POST", "/api/jobs/preview-targets", { targets: { pool: MATCH_POOL, match: "ram_mb >= 4000" } });
   check("preview counts matching devices", (pv.body?.count ?? 0) >= 1, JSON.stringify(pv.body));
   check("preview names them", (pv.body?.devices ?? []).every((d: any) => typeof d.device_id === "string"));
   const bad = await json("POST", "/api/jobs/preview-targets", { targets: { match: "ram_mb >>> 4" } });
@@ -679,7 +683,7 @@ console.log(`smoke against ${BASE}`);
   const FAN = `smoke-preview-fan-${run}`;
   const fan = await json("POST", "/api/jobs", {
     schema: 1, job_id: FAN, workload: "benchmark", executor: "device", backend: "synthetic",
-    fanout: true, targets: { pool: "match-pool", match: "ram_mb >= 4000" },
+    fanout: true, targets: { pool: MATCH_POOL, match: "ram_mb >= 4000" },
   });
   check(
     "fan-out enqueues exactly what the preview promised",
@@ -771,26 +775,38 @@ console.log(`smoke against ${BASE}`);
 
 // 28. a device with no battery telemetry is not a low battery
 {
-  // iOS simulators report -1 for battery. Counting that as "below 15%" would
-  // make every simulator on the shelf a permanent low-battery alert.
+  // Measured as one delta, not absolutes: this suite shares a collector with
+  // whatever ran before it, so an absolute count only holds on a fresh
+  // database. Both devices are registered between a single pair of readings —
+  // low_battery only counts devices still 'online', so any earlier device
+  // aging past that threshold mid-measurement would move an unrelated count,
+  // and the narrower the window, the less that can happen.
+  const lowBattery = async () =>
+    ((await json("GET", "/api/overview?fresh=1")).body?.devices?.low_battery ?? 0) as number;
+  const before = await lowBattery();
+
+  // iOS simulators report -1 for battery: "no battery telemetry", not "1%".
   const SIM = `smoke-sim-${run}`;
   await json("POST", "/devices/register", { device_id: SIM, descriptor: { model: "iPhone 16 Simulator", os: "ios-18.4" }, pools: [] });
   await json("POST", "/results", {
     schema: 1, kind: "beacon", device_id: SIM,
     beacon: { battery_pct: -1, charging: false, thermal: "nominal" },
   });
-  const ov = await json("GET", "/api/overview?fresh=1");
-  check("a -1 battery is not counted as low", (ov.body?.devices?.low_battery ?? 0) === 0, JSON.stringify(ov.body?.devices));
-
-  // A genuinely flat device still counts.
+  // A genuinely flat device, so the assertion distinguishes "-1 is ignored"
+  // from "the counter is simply broken".
   const FLAT = `smoke-flat-${run}`;
   await json("POST", "/devices/register", { device_id: FLAT, descriptor: { model: "Flat" }, pools: [] });
   await json("POST", "/results", {
     schema: 1, kind: "beacon", device_id: FLAT,
     beacon: { battery_pct: 7, charging: false, thermal: "nominal" },
   });
-  const ov2 = await json("GET", "/api/overview?fresh=1");
-  check("a real flat battery is still counted", (ov2.body?.devices?.low_battery ?? 0) === 1, JSON.stringify(ov2.body?.devices));
+
+  const after = await lowBattery();
+  check(
+    "exactly one of a -1 battery and a 7% battery counts as low",
+    after === before + 1,
+    `before=${before} after=${after} (a -1 simulator battery must not count; 7% must)`,
+  );
 }
 
 // 29. the legacy dashboard's own links still resolve to legacy pages
