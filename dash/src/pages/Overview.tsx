@@ -45,9 +45,14 @@ export function Overview() {
                   }
                 />
               </div>
-              {d.devices.low_battery > 0 && (
+              {d.devices.low_battery_devices.length > 0 && (
                 <p class="empty">
-                  {d.devices.low_battery} device{d.devices.low_battery === 1 ? "" : "s"} below 15% and not charging.
+                  Below 15% and not charging:{" "}
+                  {d.devices.low_battery_devices.map((id) => (
+                    <Link key={id} to={`/devices/${encodeURIComponent(id)}`}>
+                      <code>{id}</code>{" "}
+                    </Link>
+                  ))}
                 </p>
               )}
             </Panel>

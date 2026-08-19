@@ -775,15 +775,12 @@ console.log(`smoke against ${BASE}`);
 
 // 28. a device with no battery telemetry is not a low battery
 {
-  // Measured as one delta, not absolutes: this suite shares a collector with
-  // whatever ran before it, so an absolute count only holds on a fresh
-  // database. Both devices are registered between a single pair of readings —
-  // low_battery only counts devices still 'online', so any earlier device
-  // aging past that threshold mid-measurement would move an unrelated count,
-  // and the narrower the window, the less that can happen.
+  // Asserted by name, not by arithmetic on a global count. Only devices that
+  // are still 'online' are counted, so any earlier run's device crossing the
+  // staleness threshold mid-measurement would move a total this test never
+  // touched — which is exactly the flake an absolute or delta check produced.
   const lowBattery = async () =>
-    ((await json("GET", "/api/overview?fresh=1")).body?.devices?.low_battery ?? 0) as number;
-  const before = await lowBattery();
+    ((await json("GET", "/api/overview?fresh=1")).body?.devices?.low_battery_devices ?? []) as string[];
 
   // iOS simulators report -1 for battery: "no battery telemetry", not "1%".
   const SIM = `smoke-sim-${run}`;
@@ -792,8 +789,8 @@ console.log(`smoke against ${BASE}`);
     schema: 1, kind: "beacon", device_id: SIM,
     beacon: { battery_pct: -1, charging: false, thermal: "nominal" },
   });
-  // A genuinely flat device, so the assertion distinguishes "-1 is ignored"
-  // from "the counter is simply broken".
+  // A genuinely flat device, so the check distinguishes "-1 is ignored" from
+  // "the list is simply empty".
   const FLAT = `smoke-flat-${run}`;
   await json("POST", "/devices/register", { device_id: FLAT, descriptor: { model: "Flat" }, pools: [] });
   await json("POST", "/results", {
@@ -801,12 +798,9 @@ console.log(`smoke against ${BASE}`);
     beacon: { battery_pct: 7, charging: false, thermal: "nominal" },
   });
 
-  const after = await lowBattery();
-  check(
-    "exactly one of a -1 battery and a 7% battery counts as low",
-    after === before + 1,
-    `before=${before} after=${after} (a -1 simulator battery must not count; 7% must)`,
-  );
+  const low = await lowBattery();
+  check("a -1 battery is not counted as low", !low.includes(SIM), JSON.stringify(low));
+  check("a real flat battery is counted as low", low.includes(FLAT), JSON.stringify(low));
 }
 
 // 29b. results views (plan D3)
