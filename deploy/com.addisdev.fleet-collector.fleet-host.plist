@@ -47,6 +47,18 @@
     <string>/Users/elsie/fleet-collector/artifacts/store</string>
     <key>FLEET_PORT</key>
     <string>8788</string>
+
+    <!-- Guards the dashboard's mutating endpoints (cancel, retry, forget a
+         device, artifact GC, pool power). A speed bump, not authentication:
+         POST /jobs stays open so CI and curl keep working, and anyone on the
+         LAN can still enqueue. What it stops is a stray tab or a misfired
+         script deleting something. Generate one per host and keep it out of
+         git -- this file is a template, the real value lives only in the
+         installed copy under ~/Library/LaunchAgents:
+             openssl rand -base64 24 | tr -d '/+=' | cut -c1-32
+    <key>FLEET_DASH_TOKEN</key>
+    <string>generate-your-own</string>
+    -->
   </dict>
 
   <key>StandardOutPath</key>

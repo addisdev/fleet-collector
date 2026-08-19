@@ -276,7 +276,18 @@ stay visible in `GET /api/devices`.
 **`FLEET_DASH_TOKEN`** guards every mutation above: set it and the dashboard
 must send `X-Fleet-Token` (enter it on the System screen; it is kept in that
 browser's localStorage). Unset, the default, leaves mutations open exactly as
-before. This is a speed bump, not authentication — `POST /jobs` stays open for
+before. On fleet-host it lives in the installed LaunchAgent, which `chmod 600`
+because it now holds a secret — deploying by rsync does not touch
+`~/Library/LaunchAgents`, so the token survives a redeploy, but reinstalling the
+plist from `deploy/` would drop it. Generate one with:
+
+```bash
+openssl rand -base64 24 | tr -d '/+=' | cut -c1-32
+```
+
+Note the device and executor paths (`/devices/:id/next-job`,
+`/executor/next-job`, `POST /results`) are deliberately **not** guarded — the
+fleet must keep running whether or not anyone has a token. This is a speed bump, not authentication — `POST /jobs` stays open for
 CI and curl, so anyone who can reach the collector can still enqueue. What the
 token buys is that a stray tab or misfired script cannot *cancel* or *delete*.
 
