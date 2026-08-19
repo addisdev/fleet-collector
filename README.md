@@ -354,6 +354,34 @@ Devices must be **physically attached to fleet-host** for it to drive them. With
 nothing attached, a host job is claimed and fails cleanly with
 `no android targets attached`, which is the correct answer rather than a hang.
 
+## The iOS executor on the workstation
+
+`simctl` needs full Xcode, which fleet-host does not have, so iOS host work runs
+on the workstation that hosts the GitHub runners —
+[`deploy/com.addisdev.fleet-executor-ios.plist`](deploy/com.addisdev.fleet-executor-ios.plist),
+named `mac-xcode`. It runs **natively, not in the runner's Docker container**:
+simulators are driven through the host's CoreSimulator and a Linux container on
+macOS cannot reach them.
+
+Jobs reach it with `targets.executor: "mac-xcode"`. Unset stays permissive, so
+anything not pinned is claimable by whichever executor is free.
+
+### Why there is an SSH tunnel
+
+macOS 26+ gates local-network access per app, and a process started by launchd
+has no grant and no way to prompt for one. The same node binary that reaches
+`192.168.50.27` from Terminal gets `EHOSTUNREACH` under launchd — confirmed by
+running the same fetch both ways.
+
+So [`deploy/com.addisdev.fleet-tunnel.plist`](deploy/com.addisdev.fleet-tunnel.plist)
+forwards `127.0.0.1:18788` to the collector and the executor talks to loopback,
+which is not gated. 18788 because 8788 on that machine belongs to another
+project.
+
+**The cleaner fix is to grant Local Network access to node in System Settings**
+and point `FLEET_URL` back at the LAN address; the tunnel can then be removed.
+That needs a human at the keyboard, which is why it is not what is deployed.
+
 ## Schedules and targeting
 
 The nightly and weekly runs live in [`scripts/seed-schedules.ts`](scripts/seed-schedules.ts),
