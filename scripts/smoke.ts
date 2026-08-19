@@ -900,6 +900,11 @@ console.log(`smoke against ${BASE}`);
   check("a flat device raises a low-battery alert", !!batt, JSON.stringify((list1.body?.alerts ?? []).map((a: any) => a.rule)));
   check("the failed lease job raises a job-failed alert", (list1.body?.alerts ?? []).some((a: any) => a.rule === "job-failed" && a.subject === LEASE_JOB));
   check("alerts report whether a webhook exists", typeof list1.body?.webhook === "boolean");
+  // The Schedules page and the alert rule must call the same schedule late at
+  // the same moment, or the banner stays silent while another screen says
+  // something is wrong.
+  const sysThresh = (await json("GET", "/api/alerts")).body?.thresholds?.scheduleLateS;
+  check("the missed-schedule threshold is shared, not duplicated", sysThresh === 300, JSON.stringify(sysThresh));
 
   // A condition that stays true is one alert, not one per tick — the whole
   // point of storing alerts as state.

@@ -8,6 +8,11 @@ import type { ComponentChildren } from "preact";
 
 export type Point = { t: number; v: number | null };
 
+/** A battery series is a continuous signal, so a stretch with no samples must
+ *  break the line rather than draw a slope nobody measured. Shared so the device
+ *  chart and the drain chart cannot drift apart on what counts as a gap. */
+export const BATTERY_GAP_MS = 10 * 60 * 1000;
+
 const W = 800;
 const H = 170;
 const PAD = { top: 10, right: 8, bottom: 20, left: 30 };
@@ -62,7 +67,7 @@ export function TimeSeries({
   yMin = 0,
   yMax = 100,
   unit = "",
-  gapMs = 10 * 60 * 1000,
+  gapMs = BATTERY_GAP_MS,
   children,
 }: {
   points: Point[];

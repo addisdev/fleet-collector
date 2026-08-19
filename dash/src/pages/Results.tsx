@@ -8,7 +8,7 @@
 // out of a field that means something else, the view says so instead of
 // presenting it as a measurement.
 import { useApi } from "../api.js";
-import { Bars, MultiSeries, TimeSeries } from "../chart.js";
+import { BATTERY_GAP_MS, Bars, MultiSeries, TimeSeries } from "../chart.js";
 import { useQuery } from "../router.js";
 import { Link, Loaded, Panel, Pill, Select, agoFrom, clock, duration, num } from "../ui.js";
 
@@ -458,6 +458,10 @@ function Drain() {
                     <MultiSeries
                       yMax={100}
                       unit="battery %"
+                      // Same gap rule as the device battery chart: a run that
+                      // went quiet for hours must not show a drain slope
+                      // across them.
+                      gapMs={BATTERY_GAP_MS}
                       series={byDevice.map((dev) => ({
                         name: dev,
                         points: r.curve

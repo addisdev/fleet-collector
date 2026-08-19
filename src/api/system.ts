@@ -93,7 +93,9 @@ export function schedulesView(now = new Date()) {
       prev != null &&
       s.last_run != null &&
       s.last_run !== minuteKey(prev) &&
-      now.getTime() - prev.getTime() > 120_000;
+      // Same threshold the schedule-missed alert uses, so this page and the
+      // alert banner can never disagree about whether a schedule is late.
+      now.getTime() - prev.getTime() > THRESHOLDS.scheduleLateS * 1000;
     const template = parse<Record<string, any>>(s.template, {});
     return {
       id: s.id,
