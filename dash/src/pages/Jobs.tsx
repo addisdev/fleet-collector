@@ -1,6 +1,7 @@
 import { useApi, type Job, type JobList } from "../api.js";
 import { useQuery } from "../router.js";
-import { Filters, Link, Loaded, Pager, Panel, Pill, Search, Select, agoFrom, duration } from "../ui.js";
+import { useDeviceNames } from "../names.js";
+import { DeviceName, Filters, Link, Loaded, Pager, Panel, Pill, Search, Select, agoFrom, duration } from "../ui.js";
 
 /** How much of the lease window is left. Green while there is room, red when a
  *  sweep is imminent — the bar is the "is this job about to be requeued?" answer. */
@@ -27,6 +28,7 @@ export function LeaseCell({ job }: { job: Job }) {
 }
 
 export function JobRows({ jobs }: { jobs: Job[] }) {
+  const names = useDeviceNames();
   return (
     <table>
       <tr>
@@ -54,13 +56,9 @@ export function JobRows({ jobs }: { jobs: Job[] }) {
             </td>
             <td class="dim wrap-anywhere">
               {j.claimed_by ? (
-                <Link to={`/devices/${encodeURIComponent(j.claimed_by)}`}>
-                  <code>{j.claimed_by}</code>
-                </Link>
+                <DeviceName id={j.claimed_by} names={names} />
               ) : j.device_id ? (
-                <Link to={`/devices/${encodeURIComponent(j.device_id)}`}>
-                  <code>{j.device_id}</code>
-                </Link>
+                <DeviceName id={j.device_id} names={names} />
               ) : (
                 j.pool ?? j.match ?? "—"
               )}

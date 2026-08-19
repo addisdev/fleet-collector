@@ -4,7 +4,8 @@
 import { useState } from "preact/hooks";
 import { useApi, type Locks } from "../api.js";
 import { mutate, useMutation, useToken } from "../mutate.js";
-import { Actions, Button, ConfirmButton, ErrorBox, Field, Link, Loaded, Panel, Pill, Stat, agoFrom, bytes, clock, duration } from "../ui.js";
+import { useDeviceNames } from "../names.js";
+import { Actions, Button, ConfirmButton, DeviceName, ErrorBox, Field, Link, Loaded, Panel, Pill, Stat, agoFrom, bytes, clock, duration } from "../ui.js";
 
 function TokenPanel({ required }: { required: boolean }) {
   const [saved, save] = useToken();
@@ -202,6 +203,7 @@ export function System() {
   const state = useApi<SystemData>("/api/system", ["artifact", "job"], 60_000);
   const locks = useApi<Locks>("/api/locks", ["lock", "job"], 30_000);
   const executors = useApi<Executors>("/api/executors", ["job"], 30_000);
+  const names = useDeviceNames();
 
   return (
     <>
@@ -222,9 +224,7 @@ export function System() {
                   {l.locks.map((lk) => (
                     <tr key={lk.device_id}>
                       <td class="wrap-anywhere">
-                        <Link to={`/devices/${encodeURIComponent(lk.device_id)}`}>
-                          <code>{lk.device_id}</code>
-                        </Link>
+                        <DeviceName id={lk.device_id} names={names} />
                       </td>
                       <td class="wrap-anywhere">
                         <Link to={`/jobs/${encodeURIComponent(lk.job_id)}`}>

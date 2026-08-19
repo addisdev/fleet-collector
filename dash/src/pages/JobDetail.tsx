@@ -1,7 +1,8 @@
 import { useApi, type JobDetail as Detail, type ResultRow } from "../api.js";
 import { mutate, useMutation } from "../mutate.js";
 import { navigate } from "../router.js";
-import { Actions, Button, ConfirmButton, CopyId, ErrorBox, Json, Link, Loaded, Panel, Pill, Stat, bytes, clock, duration, num } from "../ui.js";
+import { useDeviceNames } from "../names.js";
+import { Actions, Button, ConfirmButton, CopyId, DeviceName, ErrorBox, Json, Link, Loaded, Panel, Pill, Stat, bytes, clock, duration, num } from "../ui.js";
 import { JobRows, LeaseCell } from "./Jobs.js";
 
 /** One line that says what a result row actually reported, per workload. */
@@ -24,7 +25,7 @@ function summarize(payload: Record<string, any>): string {
   return "";
 }
 
-function Results({ results }: { results: ResultRow[] }) {
+function Results({ results, names }: { results: ResultRow[]; names: Record<string, string> }) {
   if (results.length === 0) return <p class="empty">No result rows yet.</p>;
   return (
     <div class="scroll">
@@ -38,9 +39,7 @@ function Results({ results }: { results: ResultRow[] }) {
         {results.map((r) => (
           <tr key={`${r.device_id}-${r.iter}`}>
             <td class="wrap-anywhere">
-              <Link to={`/devices/${encodeURIComponent(r.device_id)}`}>
-                <code>{r.device_id}</code>
-              </Link>
+              <DeviceName id={r.device_id} names={names} />
             </td>
             <td class="num">
               {r.iter}
@@ -118,6 +117,7 @@ function JobActions({ job, onDone }: { job: Detail; onDone: () => void }) {
 
 export function JobDetail({ id }: { id: string }) {
   const state = useApi<Detail>(`/api/jobs/${encodeURIComponent(id)}`, ["job", "result", "beacon", "lock"], 15_000);
+  const names = useDeviceNames();
 
   return (
     <>
@@ -170,9 +170,7 @@ export function JobDetail({ id }: { id: string }) {
                         <td class="dim">{k}</td>
                         <td class="wrap-anywhere">
                           {k === "pinned device" ? (
-                            <Link to={`/devices/${encodeURIComponent(String(v))}`}>
-                              <code>{String(v)}</code>
-                            </Link>
+                            <DeviceName id={String(v)} names={names} />
                           ) : (
                             <code>{String(v)}</code>
                           )}
@@ -198,7 +196,7 @@ export function JobDetail({ id }: { id: string }) {
             </Panel>
 
             <Panel title={`Results (${j.results.length})`}>
-              <Results results={j.results} />
+              <Results results={j.results} names={names} />
             </Panel>
 
             {j.artifacts.length > 0 && (
@@ -259,9 +257,7 @@ export function JobDetail({ id }: { id: string }) {
                     {j.locks.map((l) => (
                       <tr key={l.device_id}>
                         <td>
-                          <Link to={`/devices/${encodeURIComponent(l.device_id)}`}>
-                            <code>{l.device_id}</code>
-                          </Link>
+                          <DeviceName id={l.device_id} names={names} />
                         </td>
                         <td class="dim">since {clock(l.acquired_at)}</td>
                       </tr>

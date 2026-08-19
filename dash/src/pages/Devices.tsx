@@ -1,7 +1,55 @@
 // The shelf. What is online, what it is doing, and how to get to it.
-import { useApi, type DeviceList } from "../api.js";
+import { useState } from "preact/hooks";
+import { useApi, type Device, type DeviceList } from "../api.js";
+import { mutate, useMutation } from "../mutate.js";
+import { refreshNames } from "../names.js";
 import { useQuery } from "../router.js";
 import { Filters, Link, Loaded, Panel, Pill, Search, Select, Stat, agoFrom } from "../ui.js";
+
+/** Rename in place. Naming a shelf is a dozen small edits in one sitting, and
+ *  making each one a trip to a detail page and back is how it does not happen. */
+function Rename({ device, onDone }: { device: Device; onDone: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(device.nickname ?? "");
+
+  const save = useMutation(async () => {
+    const r = await mutate("PATCH", `/api/devices/${encodeURIComponent(device.device_id)}`, {
+      nickname: value.trim() || null,
+    });
+    await refreshNames();
+    setEditing(false);
+    onDone();
+    return r;
+  });
+
+  if (!editing)
+    return (
+      <button type="button" class="linkish" onClick={() => setEditing(true)}>
+        {device.nickname ? "rename" : "name it"}
+      </button>
+    );
+
+  return (
+    <span class="rename">
+      <input
+        autofocus
+        value={value}
+        placeholder="shelf top left"
+        onInput={(e) => setValue((e.target as HTMLInputElement).value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void save.go();
+          if (e.key === "Escape") setEditing(false);
+        }}
+      />
+      <button type="button" class="linkish" disabled={save.busy} onClick={() => void save.go()}>
+        save
+      </button>
+      <button type="button" class="linkish" onClick={() => setEditing(false)}>
+        cancel
+      </button>
+    </span>
+  );
+}
 
 export function Battery({ pct, charging }: { pct: number | null; charging: boolean | null }) {
   if (pct == null) return <span class="faint">—</span>;
@@ -78,6 +126,7 @@ export function Devices() {
                   <table>
                     <tr>
                       <th>Device</th>
+                      <th></th>
                       <th>Hardware</th>
                       <th>Pools</th>
                       <th>Battery</th>
@@ -89,12 +138,22 @@ export function Devices() {
                       <tr key={dev.device_id}>
                         <td class="wrap-anywhere">
                           <Link to={`/devices/${encodeURIComponent(dev.device_id)}`}>
-                            <code>{dev.device_id}</code>
+                            {dev.nickname ? (
+                              <>
+                                <strong>{dev.nickname}</strong>
+                                <div class="faint mono devid">{dev.device_id}</div>
+                              </>
+                            ) : (
+                              <code>{dev.device_id}</code>
+                            )}
                           </Link>
                           <div>
                             <Pill kind={dev.status} />
                             {dev.simulator && <span class="faint"> simulator</span>}
                           </div>
+                        </td>
+                        <td>
+                          <Rename device={dev} onDone={state.reload} />
                         </td>
                         <td>
                           {String(dev.descriptor.model ?? "?")}
