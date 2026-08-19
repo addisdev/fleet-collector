@@ -62,7 +62,18 @@ type JobSpec = {
   workload: string;
   executor: "device" | "host";
   fanout?: boolean;
-  targets?: { pool?: string; match?: string; exclusive?: boolean; device_id?: string };
+  targets?: {
+    pool?: string;
+    match?: string;
+    exclusive?: boolean;
+    device_id?: string;
+    // Which host executor should claim this. Not a capability label -- it is a
+    // statement about which machine can physically reach the toolchain or the
+    // device, which is not a property of any device, so a match expression
+    // cannot express it. iOS work needs the Mac with Xcode; Android shelf work
+    // needs the machine the shelf is cabled to.
+    executor?: string;
+  };
   lease?: { ttl_s?: number; max_attempts?: number };
   // Queue position and provenance. Both are collector bookkeeping rather than
   // instructions to the runner, which ignores them.
@@ -126,6 +137,9 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
     .all(executor) as { job_id: string; spec: string }[];
   for (const row of rows) {
     const spec = JSON.parse(row.spec) as JobSpec;
+    // Host jobs may name the executor that should take them. Unset stays
+    // permissive: any executor claims it, exactly as before.
+    if (executor === "host" && spec.targets?.executor && spec.targets.executor !== claimant) continue;
     if (executor === "device") {
       if (spec.targets?.device_id && spec.targets.device_id !== claimant) continue;
       const pool = spec.targets?.pool;
