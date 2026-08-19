@@ -834,6 +834,56 @@ console.log(`smoke against ${BASE}`);
   check("a real device is not mistaken for a simulator", realRow?.simulator === false, JSON.stringify(realRow?.simulator));
 }
 
+// 30. operations (plan D4): schedules, artifacts GC, retention, executors
+{
+  const SCHED2 = `smoke-ops-sched-${run}`;
+  const up = await json("POST", "/api/schedules", {
+    id: SCHED2, cron: "0 3 * * *", enabled: false,
+    template: { schema: 1, workload: "benchmark", executor: "device", backend: "synthetic",
+                targets: { device_id: `smoke-nobody-${run}` } },
+  });
+  check("schedule upserts through the guarded route", up.status === 201, JSON.stringify(up.body));
+  const on = await json("PATCH", `/api/schedules/${SCHED2}`, { enabled: true });
+  check("schedule enables through the guarded route", on.status === 200 && on.body?.enabled === true);
+
+  // Run-now must not consume the cron dedup key, or the schedule would skip
+  // its next real firing.
+  const fired = await json("POST", `/api/schedules/${SCHED2}/run`, {});
+  check("run-now enqueues immediately", fired.status === 201 && String(fired.body?.job_id ?? "").includes("-manual-"), JSON.stringify(fired.body));
+  const after = await json("GET", "/api/schedules");
+  const row = (after.body?.schedules ?? []).find((s: any) => s.id === SCHED2);
+  check("run-now leaves the cron dedup key untouched", row?.last_run === null, JSON.stringify(row?.last_run));
+  await json("POST", `/api/jobs/${fired.body?.job_id}/cancel`, {});
+  check("schedule deletes", (await json("DELETE", `/api/schedules/${SCHED2}`)).status === 200);
+
+  // GC must never offer an artifact a job still points at.
+  const gc = await json("GET", "/api/artifacts/gc-candidates?days=0");
+  const shas = (gc.body?.candidates ?? []).map((c: any) => c.sha256);
+  const bench = await json("GET", `/api/jobs/${BENCH_JOB}`);
+  const modelSha = bench.body?.spec?.model?.sha256;
+  check("gc lists candidates", gc.status === 200 && typeof gc.body?.count === "number", JSON.stringify(gc.body?.count));
+  check("gc never offers a referenced artifact", !shas.includes(modelSha), `${modelSha} was offered for deletion`);
+  const refusal = await json("DELETE", `/api/artifacts/${modelSha}`);
+  check("deleting a referenced artifact is refused", refusal.status === 409, JSON.stringify(refusal.body));
+
+  // Retention defaults to a dry run: the count comes before the deletion.
+  const dry = await json("POST", "/api/system/retention", { beacon_days: 3650, event_days: 3650 });
+  check("retention dry-runs by default", dry.body?.dry_run === true && typeof dry.body?.would_delete?.beacons === "number", JSON.stringify(dry.body));
+  const bad = await json("POST", "/api/system/retention", { beacon_days: 0 });
+  check("retention rejects a zero-day window", bad.status === 400, JSON.stringify(bad.body));
+
+  const sweep = await json("POST", "/api/system/sweep", {});
+  check("sweep runs through the guarded route", sweep.status === 200 && Array.isArray(sweep.body?.requeued));
+
+  // The executor registers itself simply by polling, so this needs no new
+  // endpoint on the executor side.
+  await json("GET", `/executor/next-job?name=smoke-exec-${run}`);
+  const execs = await json("GET", "/api/executors");
+  const mine = (execs.body?.executors ?? []).find((e: any) => e.name === `smoke-exec-${run}`);
+  check("a polling executor is recorded", !!mine, JSON.stringify((execs.body?.executors ?? []).map((e: any) => e.name)));
+  check("a just-polled executor reads as polling", mine?.status === "polling", JSON.stringify(mine));
+}
+
 // 29. the legacy dashboard's own links still resolve to legacy pages
 {
   const html = await (await fetch(`${BASE}/dash/legacy`)).text();

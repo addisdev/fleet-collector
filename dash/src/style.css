@@ -240,6 +240,10 @@ h1 .newjob { font-size: 0.78rem; color: var(--accent); margin-left: 0.6rem; font
 .timeline li { padding: 0.2rem 0 0.2rem 0.9rem; border-left: 2px solid var(--line); }
 .timeline li span { margin-right: 0.5rem; }
 
+.event-row { border-top: 1px solid var(--line); padding: 0.5rem 0; font-size: 0.82rem; }
+.event-row:first-child { border-top: 0; }
+.field input[type="file"] { font-size: 0.8rem; padding: 0.25rem 0; background: none; border: 0; color: var(--ink); }
+
 /* --- results --- */
 
 h3.sub { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-dim); font-weight: 600; margin: 1.2rem 0 0.5rem; }

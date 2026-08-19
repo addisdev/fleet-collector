@@ -255,8 +255,16 @@ app.get("/devices/:id/next-job", async (req, reply) => {
 
 app.get("/executor/next-job", async (req, reply) => {
   const claimant = ((req.query as Record<string, string>).name ?? "host-executor");
+  // A poll is a heartbeat. Recording it here means executor liveness needs no
+  // new endpoint and no change to the executor itself — and a queue of host
+  // jobs with a dead executor stops looking like a queue that is merely slow.
+  db.prepare(
+    `INSERT INTO executors (name, last_seen, polls) VALUES (?, datetime('now'), 1)
+     ON CONFLICT(name) DO UPDATE SET last_seen = excluded.last_seen, polls = polls + 1`,
+  ).run(claimant);
   const spec = await longPollClaim("host", claimant, []);
   if (!spec) return reply.code(204).send();
+  db.prepare("UPDATE executors SET last_job = ? WHERE name = ?").run(spec.job_id, claimant);
   return spec;
 });
 

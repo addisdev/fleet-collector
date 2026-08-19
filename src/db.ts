@@ -111,6 +111,17 @@ CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events (topic, id);
 -- closes. posted=0 rows are dry runs: reporting is off (the default) or the
 -- POST failed — the audit trail exists either way, so turning CI on later
 -- changes behavior, not bookkeeping.
+-- Host executors announce themselves by polling for work, so their liveness is
+-- already observable — it just was not recorded. Without this, a dashboard can
+-- show a queue full of host jobs and no way to tell that the executor driving
+-- them died three hours ago.
+CREATE TABLE IF NOT EXISTS executors (
+  name       TEXT PRIMARY KEY,
+  last_seen  TEXT NOT NULL,
+  last_job   TEXT,
+  polls      INTEGER NOT NULL DEFAULT 0
+);
+
 -- Saved job specs for the dashboard composer: the "run the nightly benchmark
 -- again, now" button without retyping a spec. A template is a job spec with no
 -- job_id, exactly like a schedule's template.

@@ -153,6 +153,25 @@ export function registerSystem(app: FastifyInstance) {
 
   app.get("/api/schedules", async () => ({ schedules: schedulesView() }));
 
+  // Host-executor liveness, derived from their long-poll traffic. A host job
+  // queued behind a dead executor is indistinguishable from a slow one without
+  // this.
+  app.get("/api/executors", async () => ({
+    executors: (
+      db
+        .prepare(`SELECT name, last_seen, last_job, polls, ${AGE("last_seen")} AS age_s FROM executors ORDER BY last_seen DESC`)
+        .all() as { name: string; last_seen: string; last_job: string | null; polls: number; age_s: number }[]
+    ).map((e) => ({
+      ...e,
+      last_seen: iso(e.last_seen),
+      // The long poll is ~25 s, so a healthy executor is never quiet for long.
+      status: e.age_s <= 90 ? "polling" : e.age_s <= 600 ? "quiet" : "gone",
+    })),
+    queued_host_jobs: (
+      db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued' AND executor = 'host'").get() as { n: number }
+    ).n,
+  }));
+
   app.get("/api/status-reports", async () => ({
     reports: (
       db.prepare("SELECT * FROM status_reports ORDER BY created_at DESC LIMIT 100").all() as {
