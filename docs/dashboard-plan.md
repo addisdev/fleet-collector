@@ -4,7 +4,12 @@
 covers all four components. This document is collector-only, so it lives here.
 Written 2026-08-18.*
 
-> **Status — the plan is complete. D0 through D6 are built and merged** (2026-08-19),
+> **Status — complete, including the runner-side follow-up.** D0 through D6 are
+> built and merged (2026-08-19), and `vision-eval` now reports accuracy and
+> latency under their own names on both runners, so the plant-ID report is
+> reproducible from a query.
+>
+> **D0–D6** were merged
 > across [PR #1](https://github.com/addisdev/fleet-collector/pull/1) (D0–D2) and
 > [PR #2](https://github.com/addisdev/fleet-collector/pull/2) (D3–D6). The smoke
 > suite grew from 44 to **207 checks** and survives repeated runs against one
@@ -190,62 +195,64 @@ Each phase is shippable and leaves `/dash` working.
 - **No auth on a mutation surface** — mitigated by LAN/Tailscale-only + optional token + confirm dialogs; explicitly not building login.
 - **Artifact upload buffering** — streaming upload from the browser is the forcing function for the Phase-0 note about in-memory buffering; do it in D4, don't defer again.
 
-## 8. Outstanding work — the runner apps
+## 8. Done — the runner apps now emit the named fields
 
-The dashboard is done. One thing it cannot finish on its own: **`vision-eval`
-results still arrive in metric fields that mean something else.** Until the
-runner apps change, the plant-ID report cannot be replaced by a query, and the
-Results screen says so on the page rather than quietly presenting inferred
-numbers as measurements.
+**Landed 2026-08-19.** `vision-eval` results no longer arrive in metric fields
+that mean something else, so the plant-ID report is reproducible from a query.
 
-### What is stored today
+- [`fleet-runner-android#1`](https://github.com/addisdev/fleet-runner-android/pull/1)
+- [`fleet-runner-ios#1`](https://github.com/addisdev/fleet-runner-ios/pull/1)
+- [`fleet-collector#3`](https://github.com/addisdev/fleet-collector/pull/3) — the drain half
+
+### What was wrong
 
 A `vision-eval` run is a `batch` job on a `litert` (Android) or `coreml` (iOS)
-backend. Its final result row carries:
+backend. With no fields of its own it borrowed the LLM ones:
 
-| Field written | What it actually holds | Should be |
+| Was written as | Actually held | Now |
 |---|---|---|
 | `metrics.decode_tok_s` | top-1 accuracy, percent | `metrics.top1_pct` |
 | `metrics.ttft_ms` | median per-image latency | `metrics.p50_ms` |
-| `metrics.prefill_tok_s` | images per second (1000 / p50) | `metrics.images_per_s` |
-| — | **top-5 accuracy is not stored at all** | `metrics.top5_pct` |
-| — | **p95 latency is not stored at all** | `metrics.p95_ms` |
+| `metrics.prefill_tok_s` | images per second | `metrics.images_per_s` |
+| — | top-5 computed, then discarded | `metrics.top5_pct` |
+| — | p95 computed, then discarded | `metrics.p95_ms` |
 
-Confirmed by matching stored rows against the published report: the ATD
-emulator's fp32 run holds `decode_tok_s: 77.5` where the report says top-1
-77.5%, `ttft_ms: 54` where it says p50 54 ms, and `prefill_tok_s: 18.518`,
-which is exactly 1000/54.
+Both runners computed top-5 and p95 correctly and wrote them into the uploaded
+report artifact — the results table simply had nowhere to put them. That is why
+the published report carried numbers no query could reproduce.
 
-Two consequences worth knowing before trusting the table:
+The comment justifying the overload, in both runners and in the host executor's
+drain path, said the slots were reused "so the bench page can chart it".
+**That was never true.** Both bench queries filter `workload = 'benchmark'`, and
+these are `batch` and `drain` jobs. The overload bought nothing.
 
-- **Core ML rows carry `decode_tok_s: 0`.** In storage that is indistinguishable
-  from a run that scored zero, so the dashboard shows those as unknown rather
-  than as 0% accuracy. The report's iOS accuracy figures came from somewhere
-  these rows do not record.
-- **Top-5 and p95 have never been in the database.** No amount of dashboard work
-  recovers them.
+### One correction to an earlier version of this document
 
-### What each repo needs to change
+This section previously said the iOS runner "does not actually compute
+accuracy". That was wrong. It always did — but it wrote
+`(report["top1_acc"] as? Double ?? 0) * 100`, defaulting a missing value to
+**zero**, which in storage cannot be told apart from a run that genuinely scored
+nothing. That is how historical Core ML rows came to read 0.0% for runs that
+really scored 75.8%. The default is gone: a run that cannot compute accuracy now
+sends no field, and the dashboard shows unknown.
 
-- **`fleet-runner-android`** — the LiteRT vision-eval path: emit `top1_pct`,
-  `top5_pct`, `p50_ms`, `p95_ms` and `images_per_s` in `metrics`, instead of
-  overloading the LLM fields.
-- **`fleet-runner-ios`** — the Core ML path: the same fields, and actually
-  compute accuracy, which the current rows do not.
+### Verified end to end
 
-The fields are already defined in
-[`schemas/result.schema.json`](../schemas/result.schema.json), and
-`GET /api/results/vision` prefers them the moment they appear, falling back to
-the old convention for historical rows and marking those `inferred`. **No
-collector or dashboard change is needed** — this is purely runner-side.
+Not just compiled. The int8 Core ML model and the real 120-image eval set, run
+on an iPhone 17 Pro simulator against a collector:
 
-### Already done on the collector side
+```
+top1_pct 75.83   top5_pct 90.83   p50_ms 11.67   p95_ms 19.99   images_per_s 85.67
+```
 
-The drain workload had the same problem: `src/executor.ts` wrote
-percent-per-hour into `decode_tok_s`, with a comment claiming it was "for the
-bench page". It was not — both bench queries filter `workload = 'benchmark'`, so
-a drain row could never appear there. The executor now writes
-`metrics.drain_pct_per_h`, and the dashboard reads legacy rows with a flag.
+The published report says **75.8% / 90.8%** for that model — reproduced exactly,
+with top-5 and p95 in the results table for the first time and no LLM fields on
+the row. The dashboard reads it `inferred: false`, while the pre-fix run of the
+same model still shows `top1: 0.0, top5: null, inferred: true` — historical rows
+keep rendering, correctly labelled.
+
+Android carries the same change with a protocol test pinning the wire format;
+its hardware run needs a device on the shelf.
 
 ## 9. What the build changed about the plan
 

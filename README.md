@@ -181,18 +181,24 @@ server-rendered with no build step, so it is the only dashboard that works from
 a bare checkout or when a bundle fails to build. That, and nothing else, is now
 its job.
 
-### A caveat about vision-eval and drain numbers
+### Vision-eval and drain metrics
 
-Runners that predate `metrics.top1_pct` and friends encode vision-eval results
-in the LLM metric slots — top-1 accuracy in `decode_tok_s`, p50 latency in
-`ttft_ms`, throughput in `prefill_tok_s` — and drain runs put percent-per-hour
-in `decode_tok_s` too. **Top-5 and p95 were never stored anywhere**, which is
-why the published plant-ID report carries numbers the dashboard cannot show.
+Both used to ride in the LLM metric slots — vision put top-1 accuracy in
+`decode_tok_s`, p50 in `ttft_ms`, throughput in `prefill_tok_s`; drain put
+percent-per-hour in `decode_tok_s` — and top-5 and p95 were computed but had
+nowhere to go, reaching only the uploaded report artifact.
 
-`schemas/result.schema.json` now defines the named fields. The Results screen
-reads them when present, falls back to the old convention otherwise, and marks
-every value it had to infer. Until the runner apps emit the named fields, the
-vision view supplements the hand-written eval report rather than replacing it.
+**Fixed as of 2026-08-19.** `schemas/result.schema.json` defines `top1_pct`,
+`top5_pct`, `p50_ms`, `p95_ms`, `images_per_s` and `drain_pct_per_h`; the
+executor and both runner apps emit them. Verified end-to-end against the real
+int8 Core ML model and the 120-image eval set, reproducing the published
+plant-ID figures (75.8% top-1, 90.8% top-5) from the results table for the first
+time.
+
+Rows written before that keep working: the Results screen prefers the named
+fields, falls back to the old convention, and marks anything it had to infer.
+A pre-fix Core ML row reads `top1: 0.0` because the old code defaulted a missing
+accuracy to zero — read those as unknown, not as a result.
 
 ### Read API
 
