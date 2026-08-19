@@ -1020,6 +1020,34 @@ console.log(`smoke against ${BASE}`);
   check("path separators are stripped from the filename", !(traversal.headers.get("content-disposition") ?? "").includes("/"), traversal.headers.get("content-disposition") ?? "none");
 }
 
+// 33. targets.executor routes host jobs to a named executor (plan U0)
+{
+  const PINNED = `smoke-exec-pinned-${run}`, ANY = `smoke-exec-any-${run}`;
+  await json("POST", "/jobs", {
+    schema: 1, job_id: PINNED, workload: "install", executor: "host",
+    app: { name: "x", build: "1", sha256: "0".repeat(64) },
+    targets: { executor: "mac-xcode" }, lease: { ttl_s: 60, max_attempts: 1 },
+  });
+  await json("POST", "/jobs", {
+    schema: 1, job_id: ANY, workload: "install", executor: "host",
+    app: { name: "x", build: "1", sha256: "0".repeat(64) },
+    lease: { ttl_s: 60, max_attempts: 1 },
+  });
+
+  // An executor by another name must not take the pinned job -- it should skip
+  // past it and claim the unpinned one instead.
+  const other = await json("GET", `/executor/next-job?name=shelf-${run}`);
+  check("an unnamed executor skips a job pinned to another", other.body?.job_id === ANY, JSON.stringify(other.body?.job_id));
+
+  const right = await json("GET", `/executor/next-job?name=mac-xcode`);
+  check("the named executor claims its pinned job", right.body?.job_id === PINNED, JSON.stringify(right.body?.job_id));
+  check("the spec still carries the routing", right.body?.targets?.executor === "mac-xcode");
+
+  const shown = await json("GET", `/api/jobs/${PINNED}`);
+  check("the api reports which executor a job wants", shown.body?.wants_executor === "mac-xcode", JSON.stringify(shown.body?.wants_executor));
+  for (const j of [PINNED, ANY]) await json("POST", `/api/jobs/${j}/cancel`, {});
+}
+
 // 29. the legacy dashboard's own links still resolve to legacy pages
 {
   const html = await (await fetch(`${BASE}/dash/legacy`)).text();

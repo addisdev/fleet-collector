@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.addisdev.fleet-tunnel</string>
+
+  <!-- Loopback to the collector, for the iOS executor on this workstation.
+       macOS 26+ gates local-network access per app, and a process started by
+       launchd has no grant and no way to prompt for one: the same node binary
+       that reaches 192.168.50.27 from Terminal gets EHOSTUNREACH under launchd.
+       Loopback is not gated, so the executor talks to 127.0.0.1:18788 and ssh
+       carries it to fleet-host.
+
+       The alternative is granting Local Network to node in System Settings,
+       which is cleaner and needs a human at the keyboard. If that is done, this
+       agent can be removed and FLEET_URL pointed back at the LAN address.
+
+       18788 because 8788 on this machine belongs to another project. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <!-- Notice a dead link in ~90s rather than hanging a long-poll forever. -->
+    <string>-o</string><string>ServerAliveInterval=30</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-L</string><string>18788:127.0.0.1:8788</string>
+    <string>fleet-host</string>
+  </array>
+
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/addisdev/Library/Logs/fleet-tunnel.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/addisdev/Library/Logs/fleet-tunnel.log</string>
+</dict>
+</plist>

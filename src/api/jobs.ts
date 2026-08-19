@@ -66,6 +66,7 @@ export function shapeJob(j: JobRow, opts: { spec?: boolean } = {}) {
     pool: spec.targets?.pool ?? null,
     match: spec.targets?.match ?? null,
     device_id: spec.targets?.device_id ?? null,
+    wants_executor: spec.targets?.executor ?? null,
     exclusive: spec.targets?.exclusive ?? false,
     backend: spec.backend ?? null,
     model: spec.model?.name ?? null,
