@@ -159,7 +159,7 @@ Building the dashboard is what `dash:build` does; `dash:dev` runs Vite's dev
 server on :5178 and proxies `/api` to `FLEET_URL` (default `127.0.0.1:8788`), so
 you can develop the UI against the live fleet without a mock.
 
-**What is built (plan D0–D4):** the read API, the live event stream, and the
+**What is built (plan D0–D5):** the read API, the live event stream, and the
 Overview, Devices, Jobs, Schedules and System screens — including device detail
 with a 24 h battery/thermal chart, job detail with per-device results and
 artifacts, and filters that live in the URL so a filtered view is a link you can
@@ -245,6 +245,9 @@ in it means the collector restarted and clients should refetch everything.
 | `POST /api/power/:pool/:state` | Fire a pool's smart-plug webhook |
 | `POST /api/system/retention` | Prune old beacons and events; dry-runs unless `dry_run:false` |
 | `GET /api/executors` | Host-executor liveness, derived from their long-poll traffic |
+| `GET /api/alerts?state=` | Current alerts; `open,acked,snoozed` unless asked otherwise |
+| `POST /api/alerts/:id/ack`, `POST /api/alerts/:id/snooze` | Quiet one alert; snooze takes `minutes` |
+| `POST /api/alerts/tick` | Force an evaluation now |
 
 **Cancelling a claimed job** does not reach into the device. The row goes to
 `cancelled`, which means the runner's next beacon returns `lease_renewed: false`
@@ -265,6 +268,36 @@ browser's localStorage). Unset, the default, leaves mutations open exactly as
 before. This is a speed bump, not authentication — `POST /jobs` stays open for
 CI and curl, so anyone who can reach the collector can still enqueue. What the
 token buys is that a stray tab or misfired script cannot *cancel* or *delete*.
+
+## Alerts
+
+Evaluated every 60 s (`FLEET_ALERT_TICK_MS`). Alerts are **state, not events**:
+one row per (rule, subject) for as long as the condition holds, resolved when it
+stops. A device offline for six hours is one row with a rising `seen_count`, not
+360 notifications — and nothing is notified twice, ever.
+
+| Rule | Fires when |
+|---|---|
+| `device-offline` | no check-in for `FLEET_ALERT_DEVICE_OFFLINE_S` (default 15 min) |
+| `thermal-critical` | a device still reporting is thermally critical |
+| `low-battery` | below `FLEET_ALERT_LOW_BATTERY_PCT` (default 15) and not charging |
+| `job-failed` | a job failed in the last 24 h |
+| `job-stuck` | claimed, lease still being renewed, but no result rows after 2× the lease TTL |
+| `schedule-missed` | an enabled schedule that has run before missed its firing by 5 min |
+| `db-size` / `log-size` | past `FLEET_ALERT_DB_BYTES` / `FLEET_ALERT_LOG_BYTES` |
+
+`job-stuck` is the case the lease sweep cannot see: beacons keep renewing the
+claim, so the job never lapses, and without this rule a runner that is alive but
+producing nothing looks identical to one that is working.
+
+Battery and thermal are only judged on devices still checking in — a reading
+from a silent device describes whenever it went silent, not now. And a device
+reporting `-1` has no battery telemetry rather than a flat one.
+
+Set `FLEET_ALERT_WEBHOOK` to push newly opened alerts to ntfy or any webhook
+receiver; unset (the default) makes the dashboard the only channel. Acknowledge
+keeps an alert listed but stops it nagging; snooze quiets it for N minutes and it
+returns on its own. Only the condition clearing resolves an alert.
 
 ## Leases
 

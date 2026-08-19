@@ -11,14 +11,18 @@ import { cronMatches, isValidCron, minuteKey } from "./cron.js";
 import { evalMatch, isValidMatch } from "./match.js";
 import {
   ARTIFACT_DIR,
+  DATA_DIR,
   GITHUB_API,
   GITHUB_STATUS_ARMED,
   GITHUB_TOKEN,
+  LOG_FILE,
   PORT,
   POWER_CONFIG_PATH,
   SCHEDULER_TICK_MS,
   SWEEP_MS,
 } from "./config.js";
+import { evaluate, expireSnoozes, notify, reconcile } from "./alerts.js";
+import { requireToken } from "./api/guard.js";
 import { invalidateOverview, publish, registerApi } from "./api/index.js";
 import { effectivePools } from "./api/shared.js";
 import { registerDashStatic } from "./dash-static.js";
@@ -716,6 +720,42 @@ registerDashStatic(app);
 
 app.get("/", async (_req, reply) => reply.redirect("/dash"));
 
+// --- alerts (plan D5) ---
+
+const ALERT_TICK_MS = Number(process.env.FLEET_ALERT_TICK_MS ?? 60_000);
+
+function fileSize(f: string) {
+  try {
+    return statSync(f).size;
+  } catch {
+    return 0;
+  }
+}
+
+export async function alertTick() {
+  expireSnoozes();
+  const opened = reconcile(
+    evaluate(new Date(), {
+      dbBytes: ["fleet.db", "fleet.db-wal"].reduce((a, f) => a + fileSize(path.join(DATA_DIR, f)), 0),
+      logBytes: fileSize(LOG_FILE),
+    }),
+  );
+  for (const a of opened) {
+    app.log.warn({ rule: a.rule, subject: a.subject, severity: a.severity }, a.message);
+    announce({ type: "alert", id: a.id, rule: a.rule, subject: a.subject, severity: a.severity, message: a.message });
+  }
+  // Marked before the await so a webhook that hangs cannot cause a re-notify
+  // on the next tick.
+  for (const a of opened) db.prepare("UPDATE alerts SET notified = 1 WHERE id = ?").run(a.id);
+  await notify(opened, (o, m) => app.log.warn(o, m));
+  return opened;
+}
+
+app.post("/api/alerts/tick", async (req, reply) => {
+  if (!requireToken(req, reply)) return;
+  return { ok: true, opened: (await alertTick()).map((a) => a.id) };
+});
+
 app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
   app.log.info(`fleet-collector listening on :${PORT}`);
   sweepLeases(); // catch claims that lapsed while the collector was down
@@ -723,4 +763,10 @@ app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
   setInterval(() => {
     schedulerTick().catch((e) => app.log.error(e, "scheduler tick failed"));
   }, SCHEDULER_TICK_MS).unref();
+  // Evaluated on a slower cadence than the sweep: these are conditions
+  // measured in minutes, and a tighter loop would only cost the little host CPU.
+  alertTick().catch((e) => app.log.error(e, "alert tick failed"));
+  setInterval(() => {
+    alertTick().catch((e) => app.log.error(e, "alert tick failed"));
+  }, ALERT_TICK_MS).unref();
 });

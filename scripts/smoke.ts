@@ -884,6 +884,57 @@ console.log(`smoke against ${BASE}`);
   check("a just-polled executor reads as polling", mine?.status === "polling", JSON.stringify(mine));
 }
 
+// 31. alerts (plan D5): fire, dedup, acknowledge, snooze, resolve
+{
+  const BATT = `smoke-alert-batt-${run}`;
+  await json("POST", "/devices/register", { device_id: BATT, descriptor: { model: "AlertTest" }, pools: [] });
+  await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: BATT,
+    beacon: { battery_pct: 6, charging: false, thermal: "nominal" },
+  });
+
+  const tick1 = await json("POST", "/api/alerts/tick", {});
+  check("alert tick runs", tick1.status === 200, JSON.stringify(tick1.body));
+  const list1 = await json("GET", "/api/alerts");
+  const batt = (list1.body?.alerts ?? []).find((a: any) => a.rule === "low-battery" && a.subject === BATT);
+  check("a flat device raises a low-battery alert", !!batt, JSON.stringify((list1.body?.alerts ?? []).map((a: any) => a.rule)));
+  check("the failed lease job raises a job-failed alert", (list1.body?.alerts ?? []).some((a: any) => a.rule === "job-failed" && a.subject === LEASE_JOB));
+  check("alerts report whether a webhook exists", typeof list1.body?.webhook === "boolean");
+
+  // A condition that stays true is one alert, not one per tick — the whole
+  // point of storing alerts as state.
+  await json("POST", "/api/alerts/tick", {});
+  const list2 = await json("GET", "/api/alerts");
+  const same = (list2.body?.alerts ?? []).filter((a: any) => a.rule === "low-battery" && a.subject === BATT);
+  check("a persisting condition does not duplicate", same.length === 1, `${same.length} rows`);
+  check("but it does count the sightings", (same[0]?.seen_count ?? 0) >= 2, JSON.stringify(same[0]?.seen_count));
+
+  const acked = await json("POST", `/api/alerts/${batt.id}/ack`, {});
+  check("alert acknowledges", acked.status === 200 && acked.body?.state === "acked", JSON.stringify(acked.body));
+  const list3 = await json("GET", "/api/alerts");
+  const stillThere = (list3.body?.alerts ?? []).find((a: any) => a.id === batt.id);
+  check("an acknowledged alert stays listed", stillThere?.state === "acked", JSON.stringify(stillThere?.state));
+
+  const jobAlert = (list3.body?.alerts ?? []).find((a: any) => a.rule === "job-failed");
+  const snoozed = await json("POST", `/api/alerts/${jobAlert.id}/snooze`, { minutes: 30 });
+  check("alert snoozes", snoozed.status === 200 && snoozed.body?.state === "snoozed", JSON.stringify(snoozed.body));
+  check("snooze rejects a zero window", (await json("POST", `/api/alerts/${jobAlert.id}/snooze`, { minutes: 0 })).status === 400);
+
+  // The condition clearing is the only thing that resolves an alert.
+  await json("POST", "/results", {
+    schema: 1, kind: "beacon", device_id: BATT,
+    beacon: { battery_pct: 90, charging: true, thermal: "nominal" },
+  });
+  await json("POST", "/api/alerts/tick", {});
+  const list4 = await json("GET", "/api/alerts?state=open,acked,snoozed,resolved");
+  const resolved = (list4.body?.alerts ?? []).find((a: any) => a.id === batt.id);
+  check("charging the device resolves its alert", resolved?.state === "resolved", JSON.stringify(resolved?.state));
+  check("the resolved alert keeps its history", !!resolved?.first_seen && !!resolved?.resolved_at, JSON.stringify(resolved));
+  const openOnly = await json("GET", "/api/alerts?state=open");
+  check("resolved alerts drop out of the open list", !(openOnly.body?.alerts ?? []).some((a: any) => a.id === batt.id));
+  check("acking an unknown alert 404s", (await json("POST", "/api/alerts/999999/ack", {})).status === 404);
+}
+
 // 29. the legacy dashboard's own links still resolve to legacy pages
 {
   const html = await (await fetch(`${BASE}/dash/legacy`)).text();

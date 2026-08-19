@@ -14,6 +14,7 @@ import {
   SWEEP_MS,
 } from "../config.js";
 import { minuteKey, nextRun, prevRun } from "../cron.js";
+import { THRESHOLDS, webhookConfigured } from "../alerts.js";
 import { guardEnabled } from "./guard.js";
 import { AGE, iso, paging, parse, sha256Refs, tableCounts } from "./shared.js";
 import { clientCount, SERVER_INSTANCE, STARTED_AT } from "./stream.js";
@@ -152,6 +153,39 @@ export function registerSystem(app: FastifyInstance) {
   });
 
   app.get("/api/schedules", async () => ({ schedules: schedulesView() }));
+
+  app.get("/api/alerts", async (req) => {
+    const q = req.query as Record<string, string | undefined>;
+    // Open by default: resolved history is available but is not what a banner
+    // or a glance at the shelf is asking about.
+    const states = (q.state ?? "open,acked,snoozed").split(",").filter(Boolean);
+    const rows = db
+      .prepare(
+        `SELECT *, ${AGE("first_seen")} AS age_s FROM alerts
+         WHERE state IN (${states.map(() => "?").join(",")})
+         ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END, last_seen DESC LIMIT 200`,
+      )
+      .all(...states) as (Record<string, unknown> & { first_seen: string; last_seen: string; resolved_at: string | null; snooze_until: string | null })[];
+
+    return {
+      alerts: rows.map((a) => ({
+        ...a,
+        notified: !!a.notified,
+        first_seen: iso(a.first_seen),
+        last_seen: iso(a.last_seen),
+        resolved_at: iso(a.resolved_at),
+        snooze_until: iso(a.snooze_until),
+      })),
+      counts: Object.fromEntries(
+        (db.prepare("SELECT state, COUNT(*) AS n FROM alerts GROUP BY state").all() as { state: string; n: number }[]).map(
+          (r) => [r.state, r.n],
+        ),
+      ),
+      // So the UI can say whether anything beyond the dashboard will hear it.
+      webhook: webhookConfigured(),
+      thresholds: THRESHOLDS,
+    };
+  });
 
   // Host-executor liveness, derived from their long-poll traffic. A host job
   // queued behind a dead executor is indistinguishable from a slow one without

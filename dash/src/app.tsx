@@ -8,6 +8,7 @@ import { JobDetail } from "./pages/JobDetail.js";
 import { Jobs } from "./pages/Jobs.js";
 import { Overview } from "./pages/Overview.js";
 import { Schedules } from "./pages/Schedules.js";
+import { AlertBanner, Alerts } from "./pages/Alerts.js";
 import { Artifacts } from "./pages/Artifacts.js";
 import { Events } from "./pages/Events.js";
 import { Results } from "./pages/Results.js";
@@ -22,6 +23,7 @@ const NAV = [
   ["/schedules", "Schedules"],
   ["/artifacts", "Artifacts"],
   ["/events", "Events"],
+  ["/alerts", "Alerts"],
   ["/system", "System"],
 ] as const;
 
@@ -66,6 +68,7 @@ function Router() {
 
   if (match("/", route)) return <Overview />;
   if (match("/system", route)) return <System />;
+  if (match("/alerts", route)) return <Alerts />;
   if (match("/devices", route)) return <Devices />;
   if (match("/jobs", route)) return <Jobs />;
   // Before /jobs/:id, or "new" would be read as a job id.
@@ -102,6 +105,7 @@ export function App() {
         </nav>
         <LiveDot />
       </header>
+      <AlertBanner />
       <main>
         <Router />
       </main>
@@ -109,7 +113,7 @@ export function App() {
         <a href="/dash/legacy">legacy dashboard</a>
         <a href="/api/overview">/api/overview</a>
         <a href="/api/health">/api/health</a>
-        <span>D4 — operations</span>
+        <span>D5 — alerts</span>
       </footer>
     </div>
   );

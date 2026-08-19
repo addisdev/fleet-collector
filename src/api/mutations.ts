@@ -284,6 +284,38 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
     return reply.code(201).send({ ok: true, ...(res.json() as Record<string, unknown>), schedule: id });
   });
 
+  // --- alerts (plan D5) ---
+
+  app.post("/api/alerts/:id/ack", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { id } = req.params as { id: string };
+    // Acknowledged, not resolved: the condition is still true and the alert
+    // stays visible. Only the condition clearing resolves it.
+    const changed = db
+      .prepare("UPDATE alerts SET state = 'acked' WHERE id = ? AND state != 'resolved'")
+      .run(Number(id)).changes;
+    if (!changed) return reply.code(404).send({ error: "no open alert with that id" });
+    announce({ type: "alert", id: Number(id), event: "ack" });
+    return { ok: true, id: Number(id), state: "acked" };
+  });
+
+  app.post("/api/alerts/:id/snooze", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { id } = req.params as { id: string };
+    const minutes = Number((req.body as { minutes?: number } | null)?.minutes ?? 60);
+    if (!Number.isFinite(minutes) || minutes < 1) return reply.code(400).send({ error: "minutes must be >= 1" });
+
+    const changed = db
+      .prepare(
+        `UPDATE alerts SET state = 'snoozed', snooze_until = datetime('now', ?)
+         WHERE id = ? AND state != 'resolved'`,
+      )
+      .run(`+${Math.round(minutes)} minutes`, Number(id)).changes;
+    if (!changed) return reply.code(404).send({ error: "no open alert with that id" });
+    announce({ type: "alert", id: Number(id), event: "snooze" });
+    return { ok: true, id: Number(id), state: "snoozed", minutes };
+  });
+
   // --- artifacts (plan D4) ---
 
   /** Artifacts no job spec or result references. The candidates are listed

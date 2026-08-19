@@ -111,6 +111,26 @@ CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events (topic, id);
 -- closes. posted=0 rows are dry runs: reporting is off (the default) or the
 -- POST failed — the audit trail exists either way, so turning CI on later
 -- changes behavior, not bookkeeping.
+-- Alerts are state, not events: one row per (rule, subject) while the condition
+-- holds, resolved when it stops. A device that is offline for six hours is one
+-- row with a rising seen_count, not 360 notifications.
+CREATE TABLE IF NOT EXISTS alerts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule         TEXT NOT NULL,
+  subject      TEXT NOT NULL,          -- device_id, job_id, schedule id, or 'collector'
+  severity     TEXT NOT NULL,
+  message      TEXT NOT NULL,
+  state        TEXT NOT NULL DEFAULT 'open'
+               CHECK (state IN ('open','acked','snoozed','resolved')),
+  first_seen   TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen    TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at  TEXT,
+  snooze_until TEXT,
+  seen_count   INTEGER NOT NULL DEFAULT 1,
+  notified     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_state ON alerts (state, rule, subject);
+
 -- Host executors announce themselves by polling for work, so their liveness is
 -- already observable — it just was not recorded. Without this, a dashboard can
 -- show a queue full of host jobs and no way to tell that the executor driving
