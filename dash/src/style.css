@@ -338,3 +338,51 @@ tr.muted-row td { opacity: 0.6; }
 .banner:hover { text-decoration: none; filter: brightness(1.06); }
 .banner.warning { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .banner.critical { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+
+/* --- keyboard help --- */
+
+.overlay {
+  position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+  background: color-mix(in srgb, #000 55%, transparent); padding: 1rem;
+}
+.help {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 1.2rem 1.4rem; max-width: 28rem; width: 100%; max-height: 85vh; overflow-y: auto;
+}
+.help h2 { margin: 0 0 0.8rem; font-size: 0.95rem; }
+.help td { border: 0; padding: 0.2rem 0.9rem 0.2rem 0; }
+kbd {
+  font-family: var(--mono); font-size: 0.78rem; background: var(--panel-2);
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0.1rem 0.35rem;
+  white-space: nowrap;
+}
+
+/* --- phone --- */
+
+@media (max-width: 720px) {
+  /* The nav scrolls rather than wrapping: on a phone the fleet's status matters
+     more than seeing every tab at once, so the live dot keeps its place and the
+     tabs slide under the thumb. */
+  .topbar { gap: 0.5rem; padding: 0.55rem 0; }
+  .brand { font-size: 0.9rem; }
+  .brand span { display: none; }
+  /* flex-basis, not width: the base rule sets `flex: 1` (basis 0%), and for a
+     flex item basis beats width — so `width: 100%` alone never wraps the row. */
+  .nav { order: 3; flex: 1 0 100%; margin: 0 -0.75rem; padding: 0 0.75rem; }
+  .stats { grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr)); gap: 0.5rem; }
+  .stat b { font-size: 1.2rem; }
+  .panel { padding: 0.8rem 0.85rem; }
+  h1 { font-size: 1.1rem; }
+  /* Filter controls go full width instead of squeezing to unusable widths. */
+  .filters { gap: 0.6rem; }
+  .field select, .field input[type="search"], .field.wide input { min-width: 0; width: 100%; }
+  .field { flex: 1 1 100%; }
+  .field.checkbox { flex: 0 0 auto; }
+  /* Let wide tables scroll rather than squeezing a job id into a three-
+     character column. .scroll is already overflow-x:auto; the table just has to
+     stop agreeing to be 375px wide. */
+  .scroll table { min-width: 34rem; }
+  .bar-row, .soak-row { grid-template-columns: minmax(4rem, 8rem) 1fr auto; font-size: 0.75rem; }
+  .actions { gap: 0.45rem; }
+  .pager { justify-content: space-between; }
+}

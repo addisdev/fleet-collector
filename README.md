@@ -159,7 +159,7 @@ Building the dashboard is what `dash:build` does; `dash:dev` runs Vite's dev
 server on :5178 and proxies `/api` to `FLEET_URL` (default `127.0.0.1:8788`), so
 you can develop the UI against the live fleet without a mock.
 
-**What is built (plan D0–D5):** the read API, the live event stream, and the
+**What is built (plan D0–D6 — the dashboard plan is complete):** the read API, the live event stream, and the
 Overview, Devices, Jobs, Schedules and System screens — including device detail
 with a 24 h battery/thermal chart, job detail with per-device results and
 artifacts, and filters that live in the URL so a filtered view is a link you can
@@ -168,7 +168,9 @@ the browser; devices can be renamed, annotated and re-pooled. Results has views
 for benchmarks, vision evals, UI tests, drain and soak. Schedules can be
 enabled, fired now and deleted; artifacts can be uploaded and garbage-collected;
 events can be tailed; and the System screen runs sweeps, scheduler ticks, pool
-power and retention.
+power and retention. Alerts appear as a banner on every screen. The layout works
+on a phone, and `?` lists the keyboard shortcuts (`g j` jobs, `g d` devices,
+`g n` new job, `/` search).
 
 The legacy dashboard has **no unique feature left** — the cross-device benchmark
 comparison now lives in the SPA — but it is deliberately kept. It is

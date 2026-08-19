@@ -1,3 +1,4 @@
+import { useKeyboard, SHORTCUTS } from "./keys.js";
 import { useLiveState } from "./live.js";
 import { match, useRoute } from "./router.js";
 import { Link, Panel } from "./ui.js";
@@ -89,7 +90,32 @@ function Router() {
   return <NotFound route={route} />;
 }
 
+function Help({ onClose }: { onClose: () => void }) {
+  return (
+    <div class="overlay" onClick={onClose}>
+      <div class="help" onClick={(e) => e.stopPropagation()}>
+        <h2>Keyboard</h2>
+        <table>
+          {SHORTCUTS.map((s) => (
+            <tr key={s.keys}>
+              <td>
+                <kbd>{s.keys}</kbd>
+              </td>
+              <td>{s.does}</td>
+            </tr>
+          ))}
+        </table>
+        <button type="button" class="linkish" onClick={onClose}>
+          close
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
+  const { help, setHelp } = useKeyboard();
+
   return (
     <div class="shell">
       <header class="topbar">
@@ -112,9 +138,11 @@ export function App() {
       <footer class="footer">
         <a href="/dash/legacy">legacy dashboard</a>
         <a href="/api/overview">/api/overview</a>
-        <a href="/api/health">/api/health</a>
-        <span>D5 — alerts</span>
+        <button type="button" class="linkish" onClick={() => setHelp(true)}>
+          keyboard (?)
+        </button>
       </footer>
+      {help && <Help onClose={() => setHelp(false)} />}
     </div>
   );
 }
