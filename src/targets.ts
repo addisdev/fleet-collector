@@ -92,3 +92,31 @@ export function physicalIos(all: IosDeviceInfo[]): IosDeviceInfo[] {
     return d.tunnelState === "connected";
   });
 }
+
+/**
+ * Why the fleet is ignoring an attached-looking iOS device, and what to do.
+ *
+ * The first version of this said "is paired but not reachable -- unlock it,
+ * trust this Mac" for every case. That was actively misleading when the device
+ * was `unpaired`: pairing is per-Mac and does not move with the phone, so
+ * after the executor moved hosts the advice told you to unlock a phone that
+ * was already unlocked, while the actual fix -- plug it in and tap Trust on
+ * the NEW machine -- went unmentioned.
+ *
+ * Returns null when the device is fine and needs no explanation.
+ */
+export function iosNotReadyReason(d: IosDeviceInfo): string | null {
+  if (d.platform !== "iOS") return null;
+  if (d.transport === undefined || d.transport === "sameMachine") return null;
+  if (physicalIos([d]).length > 0) return null; // it is in
+
+  const name = d.marketingName ?? d.name ?? d.identifier;
+  if (d.pairingState !== undefined && d.pairingState !== "paired") {
+    return `${name} is not paired with this Mac (pairingState=${d.pairingState}) -- ` +
+      "plug it in, unlock it, and tap Trust. Pairing is per-Mac and does not move with the phone";
+  }
+  // Paired, so it is a reachability problem rather than a trust one. Only
+  // network-attached devices get here: a wired device is always accepted.
+  return `${name} is paired but not reachable (transport=${d.transport}, tunnel=${d.tunnelState}) -- ` +
+    "it is not on the network, or is asleep";
+}

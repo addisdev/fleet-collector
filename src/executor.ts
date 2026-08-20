@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "./xcparse.js";
 import {
-  fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial,
+  fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial, iosNotReadyReason,
   type IosDeviceInfo,
 } from "./targets.js";
 import { evalMatch } from "./match.js";
@@ -1094,20 +1094,17 @@ async function reportAttached() {
     // particular takes seconds and has a 30s timeout, so re-running it per
     // target is how a sweep starts outlasting the interval that scheduled it.
     const ios = await devicectlDevices();
-    // A phone that is paired but whose tunnel is down is invisible to the
-    // fleet and looks identical to one that was never plugged in. Say so
-    // once, so onboarding a device is diagnosable instead of silent.
+    // A device the fleet is ignoring looks identical to one that was never
+    // plugged in. Say why, once, so onboarding is diagnosable instead of
+    // silent -- and say the RIGHT thing, because "unlock it" is useless advice
+    // for a phone that is simply not paired with this Mac.
     for (const d of ios) {
-      if (d.platform !== "iOS" || d.transport === "sameMachine") continue;
-      if (physicalIos([d]).length > 0) continue; // it is in; nothing to report
-      const key = `${d.identifier}:${d.tunnelState}`;
+      const reason = iosNotReadyReason(d);
+      if (!reason) continue;
+      const key = `${d.identifier}:${d.pairingState}:${d.tunnelState}`;
       if (announcedIos.has(key)) continue;
       announcedIos.add(key);
-      log(
-        `${d.marketingName ?? d.name ?? d.identifier} is paired but not reachable ` +
-        `(transport=${d.transport}, tunnel=${d.tunnelState}) -- unlock it, trust this Mac, ` +
-        "and check Developer Mode is on",
-      );
+      log(reason);
     }
     let targets: Target[] = [];
     try {
