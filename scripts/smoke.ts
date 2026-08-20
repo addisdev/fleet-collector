@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
+import { fleetOwned } from "../src/targets.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
@@ -1273,6 +1274,72 @@ console.log(`smoke against ${BASE}`);
     check("the error survives a log full of warnings", capped.some((l) => l.startsWith("error:")),
       `kept ${capped.length}, first=${capped[0]?.slice(0, 40)}`);
     check("errors come before warnings", capped[0] === real, capped[0]?.slice(0, 60));
+  }
+}
+
+// 33. shelf presence: a host-driven device exists and reads online
+{
+  // What the host executor now sends every 60s for each attached device. The
+  // descriptor is the point: a device registered without one shows on the
+  // dashboard and can never be selected by `os ~ 'android'`, so it would sit
+  // there looking healthy and never be given work.
+  const SHELF = `smoke-shelf-${run}`;
+  const reg = await json("POST", "/devices/register", {
+    device_id: SHELF,
+    descriptor: { model: "SM-G955U1", os: "android-9", ram_mb: 3800, serial: SHELF, attached_to: `exec-${run}` },
+    pools: [],
+  });
+  check("an executor can register an attached device", reg.status === 200 || reg.status === 201, `status ${reg.status}`);
+
+  const listed = (await json("GET", "/api/devices?limit=500")).body?.devices
+    ?.find((d: any) => d.device_id === SHELF);
+  // The bug this fixes: a cabled phone read `offline` between jobs because
+  // nothing refreshed it -- it has no runner app of its own to beacon.
+  check("an attached device reads online", listed?.status === "online", JSON.stringify(listed?.status));
+
+  // And it must be targetable, not merely visible.
+  const JOB = `smoke-shelf-job-${run}`;
+  const made = await json("POST", "/jobs", {
+    schema: 1, job_id: JOB, workload: "ui-test", executor: "host",
+    app: { name: "x", build: "1", sha256: "deadbeef" },
+    suite: { kind: "maestro", flows: "x.yaml", app_id: "com.x" },
+    targets: { match: "os ~ 'android'", executor: `exec-${run}` },
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a host job targeting android is accepted", made.status === 201, `status ${made.status}`);
+  const claim = await json("GET", `/executor/next-job?name=exec-${run}`);
+  check("an executor-registered device is targetable by match", claim.body?.job_id === JOB,
+    JSON.stringify(claim.body?.job_id));
+  await json("POST", `/api/jobs/${JOB}/cancel`, {});
+
+  // Re-registering is how presence stays fresh, so it must not duplicate.
+  await json("POST", "/devices/register", {
+    device_id: SHELF, descriptor: { model: "SM-G955U1", os: "android-9", serial: SHELF }, pools: [],
+  });
+  const all = (await json("GET", "/api/devices?limit=500")).body?.devices ?? [];
+  check("re-registering refreshes rather than duplicates",
+    all.filter((d: any) => d.device_id === SHELF).length === 1, "duplicate device row");
+
+  // Which attached things may join the fleet at all.
+  {
+    const SIMS = {
+      "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+        { udid: "AB0637DA-212F-4E29-AE5F-26EA006BC168", name: "fleet-iphone-1" },
+        { udid: "A92E6FCA-7A8C-4255-ADA2-AF835850A259", name: "iPhone 16 Pro" },
+      ],
+    };
+    check("a fleet simulator joins", fleetOwned("AB0637DA-212F-4E29-AE5F-26EA006BC168", SIMS));
+    // The Xcode Mac is a workstation. A simulator someone booted for five
+    // minutes of debugging must not quietly start taking nightly work.
+    check("a scratch simulator does not join", !fleetOwned("A92E6FCA-7A8C-4255-ADA2-AF835850A259", SIMS));
+    // devicectl also lists booted simulators as connected devices, so the same
+    // UDID arrives a second time labelled a device. Deciding by that label let
+    // the scratch simulator straight through -- observed on the real host.
+    check("a simulator is still rejected when reported as a device",
+      !fleetOwned("A92E6FCA-7A8C-4255-ADA2-AF835850A259", SIMS));
+    // Real hardware simctl has never heard of is in: somebody cabled it up.
+    check("a cabled phone joins", fleetOwned("988a1b3541354f565a", SIMS));
+    check("a phone joins even with no simctl at all", fleetOwned("988a1b3541354f565a", null));
   }
 }
 
