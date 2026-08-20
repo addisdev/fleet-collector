@@ -60,27 +60,35 @@ export type IosDeviceInfo = {
   osVersion?: string;
   transport?: string;
   tunnelState?: string;
+  pairingState?: string;
   platform?: string;
 };
 
 /**
  * Real, reachable iPhones and iPads -- not simulators, whatever devicectl calls them.
  *
- * devicectl lists SIMULATORS as devices, with no `isSimulated` flag to tell
- * them apart: on the fleet's Xcode Mac it reports 25 "devices", of which
- * exactly one is real hardware. The field that separates them is `transport`.
- * A simulator runs on this machine and is always `sameMachine`; hardware
- * arrives over `wired` or `localNetwork`.
+ * Two fields, and neither is the obvious one.
  *
- * Filtering on tunnelState alone is what let a booted simulator register
- * itself as a physical device.
+ * `transport` separates hardware from simulators. devicectl lists SIMULATORS
+ * as devices with no `isSimulated` flag: this Mac reports 26 "devices", of
+ * which two are real. A simulator runs here and is always `sameMachine`.
+ *
+ * `tunnelState` is NOT a reachability test, which is the trap. A wired iPhone
+ * sitting on this desk reports `tunnelState: disconnected` and yet answers
+ * `devicectl device info details` immediately with a tunnel IP -- devicectl
+ * brings the tunnel up on demand. Gating on it rejected a working phone.
+ *
+ * So: cabled hardware is reachable, full stop. A device reached over the local
+ * network is only reachable while it is actually on the network, and there
+ * tunnelState is the best signal available.
  */
 export function physicalIos(all: IosDeviceInfo[]): IosDeviceInfo[] {
-  return all.filter(
-    (d) =>
-      d.platform === "iOS" &&
-      d.transport !== undefined &&
-      d.transport !== "sameMachine" &&
-      d.tunnelState === "connected",
-  );
+  return all.filter((d) => {
+    if (d.platform !== "iOS") return false;
+    if (d.transport === undefined || d.transport === "sameMachine") return false;
+    if (d.pairingState !== undefined && d.pairingState !== "paired") return false;
+    // Plugged in is plugged in.
+    if (d.transport === "wired") return true;
+    return d.tunnelState === "connected";
+  });
 }

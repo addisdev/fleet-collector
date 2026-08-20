@@ -1352,25 +1352,35 @@ console.log(`smoke against ${BASE}`);
     const DEVICECTL = [
       // A booted simulator. devicectl calls it a connected iPhone 16.
       { identifier: "AB0637DA", platform: "iOS", transport: "sameMachine", tunnelState: "connected",
-        marketingName: "iPhone 16", osVersion: "27.0" },
-      // Real hardware, plugged in.
-      { identifier: "0F72BFF3", platform: "iOS", transport: "wired", tunnelState: "connected",
-        marketingName: "iPhone 16 Pro", productType: "iPhone17,1", osVersion: "26.6" },
-      // Real hardware, paired but not currently reachable.
+        pairingState: "paired", marketingName: "iPhone 16", osVersion: "27.0" },
+      // Real hardware on the desk. Note tunnelState -- devicectl reports
+      // `disconnected` for a cabled phone that answers instantly, because the
+      // tunnel is brought up on demand. Gating on it rejected a working phone.
+      { identifier: "09A99EFE", platform: "iOS", transport: "wired", tunnelState: "disconnected",
+        pairingState: "paired", name: "MiPhone 12 Pro", productType: "iPhone13,3", osVersion: "18.7.8" },
+      // Reached over the network and not currently on it: genuinely unreachable.
       { identifier: "OFFLINE1", platform: "iOS", transport: "localNetwork", tunnelState: "disconnected",
-        marketingName: "iPhone 11", osVersion: "18.4" },
+        pairingState: "paired", marketingName: "iPhone 16 Pro", osVersion: "26.6" },
+      // On the network and answering.
+      { identifier: "NETOK001", platform: "iOS", transport: "localNetwork", tunnelState: "connected",
+        pairingState: "paired", marketingName: "iPad Air", osVersion: "18.4" },
       // A paired Apple Watch is not a UI-test target.
       { identifier: "WATCH001", platform: "watchOS", transport: "localNetwork", tunnelState: "connected",
-        marketingName: "Apple Watch Series 11" },
+        pairingState: "paired", marketingName: "Apple Watch Series 11" },
     ];
     const phys = physicalIos(DEVICECTL);
+    const ids = phys.map((d) => d.identifier);
     check("a simulator reported by devicectl is not physical hardware",
-      !phys.some((d) => d.identifier === "AB0637DA"), JSON.stringify(phys.map((d) => d.identifier)));
-    check("a wired iPhone is physical hardware", phys.some((d) => d.identifier === "0F72BFF3"));
-    check("an unreachable phone is not offered as a target",
-      !phys.some((d) => d.identifier === "OFFLINE1"), "a disconnected device would fail every job");
-    check("a watch is not an iOS target", !phys.some((d) => d.identifier === "WATCH001"));
-    check("exactly the reachable hardware is returned", phys.length === 1, JSON.stringify(phys.length));
+      !ids.includes("AB0637DA"), JSON.stringify(ids));
+    // The one that matters: this exact device, wired and answering, was
+    // rejected by a tunnelState check.
+    check("a wired phone is reachable even when the tunnel reads disconnected",
+      ids.includes("09A99EFE"), JSON.stringify(ids));
+    check("a network device that is off the network is not offered",
+      !ids.includes("OFFLINE1"), "a job would fail on an unreachable device");
+    check("a network device that is on the network is offered", ids.includes("NETOK001"), JSON.stringify(ids));
+    check("a watch is not an iOS target", !ids.includes("WATCH001"));
+        check("exactly the reachable hardware is returned", phys.length === 2, JSON.stringify(ids));
   }
 }
 

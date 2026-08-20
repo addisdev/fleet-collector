@@ -123,7 +123,7 @@ async function devicectlDevices(): Promise<IosDeviceInfo[]> {
       result?: {
         devices?: {
           identifier: string;
-          connectionProperties?: { tunnelState?: string; transportType?: string };
+          connectionProperties?: { tunnelState?: string; transportType?: string; pairingState?: string };
           hardwareProperties?: { marketingName?: string; productType?: string; platform?: string };
           deviceProperties?: { name?: string; osVersionNumber?: string };
         }[];
@@ -137,6 +137,7 @@ async function devicectlDevices(): Promise<IosDeviceInfo[]> {
       osVersion: d.deviceProperties?.osVersionNumber,
       transport: d.connectionProperties?.transportType,
       tunnelState: d.connectionProperties?.tunnelState,
+      pairingState: d.connectionProperties?.pairingState,
       platform: d.hardwareProperties?.platform,
     }));
   } catch {
@@ -144,10 +145,11 @@ async function devicectlDevices(): Promise<IosDeviceInfo[]> {
   }
 }
 
-async function listTargets(): Promise<Target[]> {
+/** `ios` lets a caller that has already listed devicectl avoid paying for it twice. */
+async function listTargets(ios?: IosDeviceInfo[]): Promise<Target[]> {
   const android = (await adbDevices()).map((id): Target => ({ id, platform: "android", kind: "device" }));
   const sims = (await bootedSimulators()).map((id): Target => ({ id, platform: "ios", kind: "simulator" }));
-  const phones = physicalIos(await devicectlDevices()).map((d): Target => ({
+  const phones = physicalIos(ios ?? (await devicectlDevices())).map((d): Target => ({
     id: d.identifier, platform: "ios", kind: "device",
   }));
   // A booted simulator is reported by BOTH simctl and devicectl, so dedupe and
@@ -827,6 +829,7 @@ async function runWebTest(job: Job) {
 async function describeTarget(
   t: Target,
   sims: Record<string, { udid: string; name: string }[]> | null,
+  ios: IosDeviceInfo[] | null,
 ): Promise<Record<string, unknown>> {
   if (t.platform === "android") {
     const prop = async (k: string) => {
@@ -887,7 +890,7 @@ async function describeTarget(
   // Physical hardware. `{model: "iphone", os: "ios"}` would register the phone
   // and leave it untargetable -- `os ~ 'ios-18'` matches nothing without the
   // version, and every iPhone on the shelf would look identical.
-  const info = (await devicectlDevices()).find((d) => d.identifier === t.id);
+  const info = (ios ?? []).find((d) => d.identifier === t.id);
   if (info) {
     return {
       model: info.marketingName ?? info.name ?? "iphone",
@@ -936,6 +939,10 @@ async function virtualNameOf(
   }
 }
 
+// Devices we have already complained about, so a permanently-paired phone
+// does not print the same line every minute.
+const announcedIos = new Set<string>();
+
 let reporting = false;
 
 async function reportAttached() {
@@ -946,14 +953,32 @@ async function reportAttached() {
   if (reporting) return;
   reporting = true;
   try {
+    // One listing per sweep of each kind, not one per device. devicectl in
+    // particular takes seconds and has a 30s timeout, so re-running it per
+    // target is how a sweep starts outlasting the interval that scheduled it.
+    const ios = await devicectlDevices();
+    // A phone that is paired but whose tunnel is down is invisible to the
+    // fleet and looks identical to one that was never plugged in. Say so
+    // once, so onboarding a device is diagnosable instead of silent.
+    for (const d of ios) {
+      if (d.platform !== "iOS" || d.transport === "sameMachine") continue;
+      if (physicalIos([d]).length > 0) continue; // it is in; nothing to report
+      const key = `${d.identifier}:${d.tunnelState}`;
+      if (announcedIos.has(key)) continue;
+      announcedIos.add(key);
+      log(
+        `${d.marketingName ?? d.name ?? d.identifier} is paired but not reachable ` +
+        `(transport=${d.transport}, tunnel=${d.tunnelState}) -- unlock it, trust this Mac, ` +
+        "and check Developer Mode is on",
+      );
+    }
     let targets: Target[] = [];
     try {
-      targets = await listTargets();
+      targets = await listTargets(ios);
     } catch {
       return;
     }
 
-    // One listing per sweep, not one per simulator.
     let sims: Record<string, { udid: string; name: string }[]> | null = null;
     if (targets.some((t) => t.platform === "ios")) {
       try {
@@ -975,7 +1000,7 @@ async function reportAttached() {
         await fetch(`${BASE}/devices/register`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ device_id: t.id, descriptor: await describeTarget(t, sims), pools: [] }),
+          body: JSON.stringify({ device_id: t.id, descriptor: await describeTarget(t, sims, ios), pools: [] }),
         });
       } catch {
         // Next tick will try again.
