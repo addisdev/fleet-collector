@@ -92,8 +92,23 @@ async function releaseLocks(jobId: string) {
   }).catch(() => {});
 }
 
+/**
+ * Android serials, or none on a host with no Android SDK.
+ *
+ * The `catch` is the point. This used to throw ENOENT on a Mac without adb,
+ * listTargets propagated it, and reportAttached's catch swallowed it -- so an
+ * iOS-only host registered NOTHING, silently, including the iPhone cabled to
+ * it. bootedSimulators and devicectlDevices have always tolerated their
+ * tooling being absent; this was the one that did not, and it went unnoticed
+ * because every host so far happened to have adb.
+ */
 async function adbDevices(): Promise<string[]> {
-  const { stdout } = await exec(ADB, ["devices"]);
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(ADB, ["devices"]));
+  } catch {
+    return [];
+  }
   return stdout
     .split("\n")
     .slice(1)
@@ -411,6 +426,12 @@ async function runXcuitest(job: Job) {
            // guess: the destination platform has to match the hardware or the
            // run fails before a single test starts.
            "-destination", `platform=${target.kind === "simulator" ? "iOS Simulator" : "iOS"},id=${target.id}`,
+           // A physical device needs a provisioning profile that lists it, and
+           // without this xcodebuild refuses rather than fetching one -- "No
+           // profiles for 'com.example' were found". Simulators are unsigned,
+           // so it costs them nothing. Xcode still needs a signed-in account
+           // with rights to the team; this only lets it act on one.
+           ...(target.kind === "simulator" ? [] : ["-allowProvisioningUpdates"]),
            ...(only ? [`-only-testing:${only}`] : [])],
           {
             timeout: Number(job.params?.timeout_s ?? 1800) * 1000,
@@ -1109,7 +1130,10 @@ async function reportAttached() {
     let targets: Target[] = [];
     try {
       targets = await listTargets(ios);
-    } catch {
+    } catch (e) {
+      // Was a bare `return`, which turned any enumerator failure into a host
+      // that reports no devices at all and says nothing about why.
+      log(`could not list attached devices: ${(e as Error).message.slice(0, 160)}`);
       return;
     }
 

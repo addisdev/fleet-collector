@@ -1278,6 +1278,22 @@ console.log(`smoke against ${BASE}`);
     check("the error survives a log full of warnings", capped.some((l) => l.startsWith("error:")),
       `kept ${capped.length}, first=${capped[0]?.slice(0, 40)}`);
     check("errors come before warnings", capped[0] === real, capped[0]?.slice(0, 60));
+
+    // A compiler diagnostic carries line:column; an XCTest FAILURE carries
+    // only a line. Requiring a column dropped every test failure from the
+    // artifact -- the single line most worth reading -- while faithfully
+    // preserving a hundred deprecation warnings. Observed on a real device
+    // run: 10 passed, 1 failed, artifact reported zero errors.
+    const xctestFailure =
+      "/Users/x/BloomsUITests.swift:228: error: -[Suite testBloomsRowAppears] : failed - collection did not load";
+    const withFailure = xcodebuildDiagnostics([
+      "/Users/x/File.swift:90:23: warning: capture of self",
+      xctestFailure,
+    ].join("\n"));
+    check("an XCTest failure line is captured despite having no column",
+      withFailure.includes(xctestFailure), JSON.stringify(withFailure));
+    check("the test failure still outranks the warning", withFailure[0] === xctestFailure,
+      withFailure[0]?.slice(0, 60));
   }
 }
 
@@ -1409,6 +1425,27 @@ console.log(`smoke against ${BASE}`);
 
     // And a device that is fine gets no complaint at all -- otherwise the log
     // fills with noise about working hardware.
+    // An iOS-only Mac has no Android SDK. adbDevices used to throw ENOENT
+    // there, listTargets propagated it, and the presence sweep's catch
+    // swallowed it -- so the host registered NOTHING, silently, including the
+    // iPhone cabled to it. Every other enumerator already tolerated its
+    // tooling being absent; this one did not, and it went unnoticed because
+    // every host until now happened to have adb.
+    //
+    // Asserted at the collector: a host that can see only iOS devices must
+    // still be able to register them.
+    const IOSONLY = `smoke-iosonly-${run}`;
+    const regd = await json("POST", "/devices/register", {
+      device_id: IOSONLY,
+      descriptor: { model: "iPhone 12 Pro", os: "ios-18.7.8", serial: IOSONLY, attached_to: `ios-only-${run}` },
+      pools: [],
+    });
+    check("an iOS-only host can register its phone", regd.status === 200 || regd.status === 201,
+      `status ${regd.status}`);
+    const seenIt = (await json("GET", "/api/devices?limit=500")).body?.devices
+      ?.find((d: any) => d.device_id === IOSONLY);
+    check("that phone is online and targetable", seenIt?.status === "online", JSON.stringify(seenIt?.status));
+
     check("a healthy wired phone produces no message",
       iosNotReadyReason({ ...unpaired, pairingState: "paired" }) === null,
       String(iosNotReadyReason({ ...unpaired, pairingState: "paired" })));
