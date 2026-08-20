@@ -296,16 +296,33 @@ async function runXcuitest(job: Job) {
       // second, so without this a run that tested NOTHING reports green.
       let failed = counted.failed || (ok ? 0 : 1);
       let note = "";
-      if (passed === 0 && failed === 0 && counted.skipped > 0) {
-        failed = counted.skipped;
-        note = `all ${counted.skipped} tests skipped (no fixture?)`;
+      // A skip is a test that did not run. Judging only the all-skipped case
+      // makes the check all-or-nothing, while the failure it guards against --
+      // a fixture rotting and coverage quietly shrinking -- is gradual: a suite
+      // that degrades from 16 passing to 1 passing and 15 skipped would stay
+      // green on the strength of the one survivor. Most of the suite not
+      // running is a result nobody should have to read a count to notice.
+      if (counted.skipped > 0 && counted.skipped >= passed + counted.failed) {
+        failed = failed || counted.skipped;
+        note = passed === 0 && counted.failed === 0
+          ? `all ${counted.skipped} tests skipped (no fixture?)`
+          : `${counted.skipped} of ${passed + counted.failed + counted.skipped} tests skipped (no fixture?)`;
       }
       if (failed > 0) { ok = false; allOk = false; }
       // The tail alone is not enough to diagnose a build failure: xcodebuild
       // prints thousands of lines of compile commands after the error, so the
       // last 4000 characters are reliably the least useful 4000 characters.
-      // Lead with every error/warning line, then the tail for context.
-      const diagnostics = (full.match(/^.*(?:error|warning):.*$/gm) ?? []).slice(0, 200);
+      // Lead with the diagnostics instead.
+      //
+      // Errors first, and only then warnings. Taking the first N in document
+      // order looks equivalent and is not: an Xcode build routinely emits
+      // hundreds of deprecation warnings, and with 250 of them ahead of it the
+      // one `error:` line falls outside the cap -- reintroducing exactly the
+      // blindness this block exists to remove.
+      const allDiagnostics = full.match(/^.*(?:error|warning):.*$/gm) ?? [];
+      const errors = allDiagnostics.filter((l) => l.includes("error:"));
+      const warnings = allDiagnostics.filter((l) => !l.includes("error:"));
+      const diagnostics = [...errors.slice(0, 100), ...warnings.slice(0, 100)];
       const logFile = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-xc-")), "xcodebuild.log");
       writeFileSync(
         logFile,

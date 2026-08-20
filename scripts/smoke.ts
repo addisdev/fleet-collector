@@ -209,7 +209,14 @@ console.log(`smoke against ${BASE}`);
 
   await sleep(2500);
   const final = await json("POST", "/jobs/sweep");
-  check("sweep fails the job once attempts run out", final.body?.failed?.includes(LEASE_JOB), JSON.stringify(final.body));
+  // Assert the OUTCOME, not this particular sweep's return value. The collector
+  // runs its own sweep every SWEEP_MS, so it frequently gets there first and
+  // this call correctly reports nothing left to do -- which made the check fail
+  // on a job that had already been failed exactly as intended. A test that goes
+  // red when the system worked is the fastest way to teach people to ignore it.
+  const exhausted = final.body?.failed?.includes(LEASE_JOB) === true
+    || (await json("GET", `/jobs/${LEASE_JOB}`)).body?.status === "failed";
+  check("sweep fails the job once attempts run out", exhausted, JSON.stringify(final.body));
   const dead = await json("GET", `/jobs/${LEASE_JOB}`);
   check(
     "exhausted job ends failed, not requeued",
@@ -1231,6 +1238,19 @@ console.log(`smoke against ${BASE}`);
     JSON.stringify(sk));
   check("a started line is not counted as a result", sk.skipped + sk.passed + sk.failed === 2,
     JSON.stringify(sk));
+
+  // The verdict rule the executor applies to those counts, asserted here
+  // because it is the part that decides whether a nightly is read or ignored.
+  const majoritySkipped = (c: { passed: number; failed: number; skipped: number }) =>
+    c.skipped > 0 && c.skipped >= c.passed + c.failed;
+  // greenfolio-ios today: 7 pass, 9 skip for want of a signed-in session. More
+  // of the suite did not run than did, so this is not a green nightly.
+  check("a majority-skipped suite is not a pass", majoritySkipped({ passed: 7, failed: 0, skipped: 9 }));
+  // The gradual case the all-or-nothing check missed: fixtures rot, one test
+  // survives, and the run would otherwise stay green on that survivor.
+  check("one survivor among skips is not a pass", majoritySkipped({ passed: 1, failed: 0, skipped: 15 }));
+  // A healthy suite with a couple of legitimately-skipped cases still passes.
+  check("a few skips in a healthy suite still pass", !majoritySkipped({ passed: 14, failed: 0, skipped: 2 }));
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
