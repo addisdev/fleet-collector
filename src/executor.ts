@@ -13,6 +13,7 @@ import {
   type IosDeviceInfo,
 } from "./targets.js";
 import { evalMatch } from "./match.js";
+import { keychainPassword, redact, KEYCHAIN_SERVICE } from "./secrets.js";
 
 const exec = promisify(execFile);
 
@@ -31,6 +32,11 @@ type Job = {
     // An app repo running its OWN XCUITest suite rather than the generic
     // FleetRunner bundle: which project, which scheme, which tests.
     project?: string; scheme?: string; only?: string;
+    // How the suite signs in. NAMES only -- the account (an email, not a
+    // secret) and which env vars the suite reads. The password is resolved on
+    // the executor host and never travels in a job spec, because specs are
+    // stored, served by the API and rendered on the dashboard.
+    credentials?: { account: string; email_var?: string; password_var?: string };
   };
   targets?: {
     pool?: string; exclusive?: boolean; executor?: string; url?: string;
@@ -326,6 +332,29 @@ async function runXcuitest(job: Job) {
   const appId = suite.app_id;
   if (!appId && !ownProject) throw new Error("xcuitest suite needs app_id or project");
   const asserts = (suite.asserts ?? []).join("|");
+
+  // Sign-in details, resolved HERE and nowhere else. A suite that needs an
+  // account skips every test that touches one -- greenfolio's skips 8 of 12 --
+  // so this is the difference between a nightly that tests the app and a
+  // nightly that tests that the app launches.
+  const cred = suite.credentials;
+  const emailVar = cred?.email_var ?? "GREENFOLIO_TEST_EMAIL";
+  const passwordVar = cred?.password_var ?? "GREENFOLIO_TEST_PASSWORD";
+  let password: string | null = null;
+  if (cred?.account) {
+    password = await keychainPassword(cred.account);
+    if (!password) {
+      // Said plainly, because the alternative is a suite that skips with the
+      // vaguer "no credentials in the environment" and looks like a fixture
+      // problem in the app rather than a missing Keychain item on this host.
+      throw new Error(
+        `no Keychain password for ${cred.account} (service "${KEYCHAIN_SERVICE}") on ${NAME}; ` +
+        `add one with: security add-generic-password -s ${KEYCHAIN_SERVICE} -a ${cred.account} -w`,
+      );
+    }
+    log(`signing in as ${cred.account} (password from the ${NAME} Keychain)`);
+  }
+
   const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === "ios"));
   if (targets.length === 0) throw new Error("no iOS targets matched this job");
 
@@ -371,6 +400,16 @@ async function runXcuitest(job: Job) {
               ...process.env,
               ...(appId ? { TEST_RUNNER_FLEET_APP_ID: appId } : {}),
               ...(asserts ? { TEST_RUNNER_FLEET_ASSERTS: asserts } : {}),
+              // TEST_RUNNER_ is the prefix xcodebuild strips before handing the
+              // variable to the test runner process -- which is where
+              // ProcessInfo.processInfo.environment is read, and from there the
+              // suite forwards it into the app's launchEnvironment.
+              ...(cred?.account && password
+                ? {
+                    [`TEST_RUNNER_${emailVar}`]: cred.account,
+                    [`TEST_RUNNER_${passwordVar}`]: password,
+                  }
+                : {}),
             },
             maxBuffer: 64 * 1024 * 1024,
           },
@@ -407,6 +446,13 @@ async function runXcuitest(job: Job) {
       // The tail alone is not enough to diagnose a build failure: xcodebuild
       // prints thousands of lines of compile commands after the error, so the
       // last 4000 characters are reliably the least useful 4000 characters.
+      // Scrub before ANY of this becomes an artifact. xcodebuild echoes its
+      // environment in places, and the log is downloadable from the dashboard,
+      // so a password that reaches the store has leaked however carefully it
+      // was fetched.
+      const secrets = password ? [password] : [];
+      full = redact(full, secrets);
+      logTail = redact(logTail, secrets);
       const diagnostics = xcodebuildDiagnostics(full);
       const logFile = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-xc-")), "xcodebuild.log");
       writeFileSync(
