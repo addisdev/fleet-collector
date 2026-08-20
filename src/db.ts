@@ -184,6 +184,24 @@ for (const [column, ddl] of [
   if (!jobColumns.has(column)) db.exec(`ALTER TABLE jobs ADD COLUMN ${ddl}`);
 }
 
+// An artifact used to be an anonymous blob: a hash, a filename and a size. That
+// is why a nightly had to pin a literal sha256 by hand, and why one of them
+// spent six days testing an APK older than the code it was meant to guard.
+// Recording which app and build an artifact IS lets a schedule ask for the
+// latest one instead of a hash somebody has to remember to update.
+const artifactColumns = new Set(
+  (db.prepare("PRAGMA table_info(artifacts)").all() as { name: string }[]).map((c) => c.name),
+);
+for (const [column, ddl] of [
+  ["app", "app TEXT"],
+  ["build", "build TEXT"],
+  ["platform", "platform TEXT"],
+] as const) {
+  if (!artifactColumns.has(column)) db.exec(`ALTER TABLE artifacts ADD COLUMN ${ddl}`);
+}
+// The lookup a nightly does every time it fires.
+db.exec("CREATE INDEX IF NOT EXISTS idx_artifacts_app ON artifacts (app, created_at DESC)");
+
 // `nickname` was the wrong word: it implied a second label beside the id rather
 // than the device's name. Renamed in place so existing names carry over — this
 // must happen before the add-column loop below, or that loop would add an empty

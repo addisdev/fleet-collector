@@ -103,6 +103,98 @@ uncertainty first.
 | **U4 — web-test workload** | New workload, Playwright runner, `targets.url`, trace/screenshot artifacts | aliquant-web suite runs from the queue and uploads a trace |
 | **U5 — nightly + CI** | Per-app schedules; `ci-enqueue` wired in each app repo; commit statuses armed | A push produces a build the nightly then tests, and a red suite is visible without opening the dashboard |
 
+## 3.1 Status, 2026-08-19
+
+**Built and running: U0, U1, U4, U5.**
+
+| Phase | State |
+|---|---|
+| U0 — route jobs to an executor | done, merged |
+| U1 — the iOS executor | done, `mac-xcode` under launchd, XCUITest green on a simulator |
+| U2 — Android suites | **blocked on builds, not on writing flows** — see below |
+| U3 — iOS suites | not started — see below |
+| U4 — web-test workload | done, `aliquant-web` green against the live deployment |
+| U5 — nightly + CI | done; two nightlies enabled and proven to fire |
+
+### What U5 changed about §1.3
+
+The plan said a nightly needs a nightly build. The fix turned out to be smaller
+and more useful than wiring CI into eight repos: **artifacts now know which app
+they are**, and a schedule can ask for `"sha256": "latest"` instead of a hash.
+
+An artifact uploaded with `x-artifact-app` belongs to that app; `latest`
+resolves at fire time to the newest one. A nightly for an app nobody has built
+yet is *skipped rather than failed*, because a job pinned to a build that does
+not exist fails in a way indistinguishable from the app being broken.
+
+So the schedule never has to be edited again, and CI's only obligation is to
+publish — `ci/publish-build.yml`, one step on merge to main.
+
+### What the first real nightly caught
+
+The proving run failed, and the reason was worth the exercise:
+`nightly-fleet-ui-smoke` had `targets: { exclusive: true }` and nothing else, so
+an **Android APK was claimed by `mac-xcode` and run against an iOS simulator.**
+That is §1.4's defect again in a new place, and it would have failed silently at
+02:30 every night.
+
+Routing it (`match: os ~ 'android'` **and** `executor: fleet-host`) fixed it:
+three consecutive runs then went to fleet-host and passed on the physical S8,
+1 passed / 0 failed in 26s.
+
+Both halves are needed and neither substitutes for the other — the match says
+what the job needs, the executor says which machine can physically reach it.
+
+### Why U2 and U3 are not built
+
+Not reluctance, and not the 40 flows. **The apps are not on the devices.**
+
+```
+$ adb -s 988a1b3541354f565a shell pm list packages | grep -E 'greenfolio|jerv|aliquant'
+(nothing)
+```
+
+The one Android device on the shelf has `com.taylab.fleetrunner` and nothing
+else. There is no greenfolio, jerv or aliquant build installed anywhere in the
+fleet, and none has ever been published to the artifact store. §1.4's `.debug`
+appId mismatch is real but it is not the blocker; the blocker is that there is
+nothing to launch.
+
+That is exactly what `ci/publish-build.yml` unblocks: once an app repo publishes
+on merge, its nightly resolves `latest`, the install workload puts it on the
+shelf, and a suite has something to drive. Writing 40 flows against screens
+nobody can open would produce flows that assert on screens I have never seen —
+which is how a suite nobody trusts gets written.
+
+**The order that works:** publish builds → install on the shelf → then write
+flows against the app that is actually running.
+
+### What the web suite caught on its first run against production
+
+`my.aliquant.app` returns a console error on every load: Cloudflare injects its
+Web Analytics beacon at the edge, and the app's own CSP — `default-src 'none'`,
+`script-src 'self'` — correctly refuses to run it. **Cloudflare Web Analytics is
+silently collecting nothing on that site.**
+
+The CSP is not the bug. It is deliberate, documented in `worker/index.ts`, and
+good. The fix is to turn off the analytics auto-injection for that zone in the
+Cloudflare dashboard, which is a decision for whoever owns it.
+
+The suite records it as an annotation rather than failing on it, on the grounds
+that the app never asked for that script and cannot remove it. Everything else
+in the console still fails the run. That line is worth keeping narrow: the list
+of hosts treated this way is one entry long and is a place bugs could hide.
+
+### Commit statuses: still dark, deliberately
+
+`report_to.github_status` records a row for every job that asks, and posts
+nothing unless `FLEET_GITHUB_STATUS=1` and `FLEET_GITHUB_TOKEN` are both set on
+the collector. Unarmed rows are visible on the dashboard, so you can see what
+*would* have been posted before anything reaches GitHub.
+
+Arming it makes a red nightly block a PR — open question 5, and a decision with
+consequences for everyone who pushes. Left off.
+
 ## 4. Design decisions
 
 ### 4.1 Route by executor, not by pool
@@ -194,9 +286,9 @@ The honest risk in nightly UI tests is not that they fail; it is that they fail
 2. **Is `greenfolio-care` a separate app or a variant?** It shares a bundle
    prefix and most of its source with `greenfolio-ios`. If it is a variant, it
    needs a suite run against the variant build, not its own catalogue.
-3. **Where is aliquant-web deployed?** A nightly needs a URL — a preview
-   deployment per build is better than testing production, but that is a CI
-   decision.
+3. ~~**Where is aliquant-web deployed?**~~ **Answered:** `my.aliquant.app`,
+   from `wrangler.jsonc`'s custom-domain route. The nightly points there. A
+   preview deployment per build is still better and is still a CI decision.
 4. **Real devices or simulators for iOS nightlies?** Simulators are reliable and
    prove less. The fleet exists because real hardware behaves differently.
 5. **Arm the GitHub commit statuses?** U5 assumes yes. It is currently dark by

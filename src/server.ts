@@ -62,6 +62,9 @@ type JobSpec = {
   workload: string;
   executor: "device" | "host";
   fanout?: boolean;
+  // `sha256: "latest"` is resolved at enqueue time to the newest build uploaded
+  // under this app name -- see resolveLatestBuild.
+  app?: { name?: string; build?: string; sha256?: string; platform?: string };
   targets?: {
     pool?: string;
     match?: string;
@@ -615,6 +618,30 @@ app.delete("/schedules/:id", async (req, reply) => {
   return { ok: true };
 });
 
+/**
+ * Resolve `app.sha256: "latest"` to the newest build uploaded for `app.name`.
+ *
+ * This is what stops a nightly from testing yesterday's code. A schedule that
+ * pins a literal hash tests that hash forever, which is how one of these spent
+ * six days guarding an APK older than the code it was meant to guard; a
+ * schedule that asks for "latest" tests whatever CI pushed most recently.
+ *
+ * Throws when there is nothing to test, rather than enqueueing a job pinned to
+ * a build that does not exist.
+ */
+function resolveLatestBuild(spec: JobSpec): JobSpec {
+  if (spec.app?.sha256 !== "latest") return spec;
+  const appName = spec.app?.name;
+  if (!appName) throw new Error("app.sha256 is 'latest' but app.name is missing");
+  const row = db
+    .prepare("SELECT sha256, build FROM artifacts WHERE app = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+    .get(appName) as { sha256: string; build: string | null } | undefined;
+  if (!row) throw new Error(`no build has been uploaded for ${appName}`);
+  // Record the build string the artifact carries, so a result says which build
+  // actually ran rather than the literal word "latest".
+  return { ...spec, app: { ...spec.app, sha256: row.sha256, build: row.build ?? spec.app.build } };
+}
+
 // Fire due schedules for the current minute (at most once per minute each).
 // Enqueues through POST /jobs via inject so fanout and validation apply.
 async function schedulerTick(now = new Date()): Promise<string[]> {
@@ -626,9 +653,20 @@ async function schedulerTick(now = new Date()): Promise<string[]> {
   for (const s of due) {
     db.prepare("UPDATE schedules SET last_run = ? WHERE id = ?").run(key, s.id);
     const jobId = `${s.id}-${key.replace(/[^0-9]/g, "")}`;
+    let payload: Record<string, unknown>;
+    try {
+      payload = resolveLatestBuild(JSON.parse(s.template) as JobSpec) as Record<string, unknown>;
+    } catch (e) {
+      // No build to test is not a red nightly -- it is a nightly that did not
+      // run. Firing it anyway against a hash that resolves to nothing would
+      // produce a failure that looks like the app is broken.
+      app.log.warn({ schedule: s.id, reason: String(e) }, "schedule skipped");
+      announce({ type: "schedule", event: "skipped", id: s.id, reason: String((e as Error).message ?? e) });
+      continue;
+    }
     const res = await app.inject({
       method: "POST", url: "/jobs",
-      payload: { ...JSON.parse(s.template), job_id: jobId },
+      payload: { ...payload, job_id: jobId },
     });
     if (res.statusCode === 201) fired.push(jobId);
     else if (res.statusCode !== 409)
@@ -694,11 +732,25 @@ app.post("/artifacts", async (req, reply) => {
   else await rename(tmp, dest);
 
   const name = (req.headers["x-artifact-name"] as string | undefined) ?? null;
+  // Which app this build IS. Optional, because an artifact can still be an
+  // anonymous blob, but a build that says so can be found by a nightly without
+  // anyone pinning its hash.
+  const app_ = (req.headers["x-artifact-app"] as string | undefined) ?? null;
+  const build = (req.headers["x-artifact-build"] as string | undefined) ?? null;
+  const platform = (req.headers["x-artifact-platform"] as string | undefined) ?? null;
   db.prepare(
-    "INSERT OR IGNORE INTO artifacts (sha256, name, size) VALUES (?, ?, ?)",
-  ).run(sha256, name, size);
-  announce({ type: "artifact", sha256, name, size });
-  return reply.code(201).send({ ok: true, sha256, size });
+    "INSERT OR IGNORE INTO artifacts (sha256, name, size, app, build, platform) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(sha256, name, size, app_, build, platform);
+  // Content-addressing means re-uploading an identical build is a no-op, so the
+  // INSERT is ignored -- but a rebuild of the same bytes under a new version
+  // string should still update what we know about it.
+  if (app_) {
+    db.prepare(
+      "UPDATE artifacts SET app = ?, build = COALESCE(?, build), platform = COALESCE(?, platform) WHERE sha256 = ?",
+    ).run(app_, build, platform, sha256);
+  }
+  announce({ type: "artifact", sha256, name, size, app: app_, build });
+  return reply.code(201).send({ ok: true, sha256, size, app: app_, build });
 });
 
 app.get("/artifacts/:sha256", async (req, reply) => {

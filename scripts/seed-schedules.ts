@@ -32,18 +32,62 @@ const SCHEDULES: Record<string, Schedule> = {
       "executor": "host",
       "app": {
         "name": "fleet-runner",
-        "build": "0.2.0-a7e3141",
-        "sha256": "c512589b7ad976518fee8ca26615b8fc7ede4480ebdb6606c3390fd1c4f05a0c"
+        // Resolved at fire time to the newest build CI uploaded under this
+        // name. A literal hash here is how this schedule spent six days
+        // guarding an APK older than the code it was meant to guard; if no
+        // build has ever been uploaded the run is skipped, not failed.
+        "build": "latest",
+        "sha256": "latest"
       },
       "suite": {
         "kind": "maestro",
         "flows": "fleetrunner/smoke.yaml"
       },
+      // Both halves matter, and the run that proved it failed without them.
+      //
+      // `match` because this is an Android APK driven by Maestro: unrouted, it
+      // was claimed and run against an iOS simulator, which is the same defect
+      // that had the plant-id eval fanning out to three simulators that could
+      // not load its model.
+      //
+      // `executor` because the phones are cabled to fleet-host and no match
+      // expression can say that -- which machine can physically reach a device
+      // is not a property of the device.
       "targets": {
+        "match": "os ~ 'android'",
+        "executor": "fleet-host",
         "exclusive": true
       },
       "lease": {
         "ttl_s": 1200
+      }
+    }
+  },
+  "nightly-aliquant-web": {
+    "cron": "0 4 * * *",
+    "template": {
+      "schema": 1,
+      "workload": "web-test",
+      "executor": "host",
+      "app": {
+        "name": "aliquant-web",
+        "build": "nightly"
+      },
+      "suite": {
+        "kind": "playwright",
+        "flows": "aliquant"
+      },
+      "params": {
+        "browser": "chromium"
+      },
+      // Pinned: browsers live on the Mac with Xcode, and an unpinned web job
+      // claimed by fleet-host is refused rather than run without a browser.
+      "targets": {
+        "executor": "mac-xcode",
+        "url": "https://my.aliquant.app"
+      },
+      "lease": {
+        "ttl_s": 900
       }
     }
   },

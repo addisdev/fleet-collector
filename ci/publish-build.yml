@@ -1,0 +1,45 @@
+# Publish a build to the fleet on every merge to main.
+#
+# Copy into an app repo as .github/workflows/publish-build.yml and change the
+# three values marked CHANGE ME. Requires the runner to reach the collector
+# (self-hosted on the tailnet) and a FLEET_COLLECTOR_URL secret.
+#
+# This is the half of nightly testing nobody thinks about. A nightly can only
+# be as fresh as the newest build it has: pinning a hash in the schedule is how
+# one of these spent six days guarding an APK older than the code it was meant
+# to guard. Publishing on merge, and letting the nightly ask for "latest",
+# means the schedule never has to be edited again.
+#
+# It deliberately does NOT enqueue a test. Publishing a build and testing a
+# build are different events -- a merge should publish whether or not a device
+# is free. For per-PR device tests see example-workflow.yml.
+name: publish-build-to-fleet
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git describe` needs history; the default shallow clone has none,
+          # so the build string would be a bare sha with no version in it.
+          fetch-depth: 0
+
+      # CHANGE ME (1/3): however this app builds.
+      - name: Build
+        run: ./gradlew :app:assembleDebug
+
+      - name: Publish to the fleet
+        run: |
+          npx --yes tsx scripts/ci-upload.ts \
+            --collector "${{ secrets.FLEET_COLLECTOR_URL }}" \
+            --app       greenfolio-android \
+            --build     "$(git describe --tags --always)" \
+            --platform  android \
+            --artifact  app/build/outputs/apk/debug/app-debug.apk
+        # CHANGE ME (2/3): --app must match the `app.name` in the fleet
+        #   schedule that tests it, or the nightly will never see the build.
+        # CHANGE ME (3/3): --artifact is the path this build actually produces.

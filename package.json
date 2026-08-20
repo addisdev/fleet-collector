@@ -12,7 +12,8 @@
     "dash:install": "npm --prefix dash install",
     "dash:build": "npm --prefix dash run build",
     "dash:dev": "npm --prefix dash run dev",
-    "seed:schedules": "tsx scripts/seed-schedules.ts"
+    "seed:schedules": "tsx scripts/seed-schedules.ts",
+    "ci:upload": "tsx scripts/ci-upload.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
