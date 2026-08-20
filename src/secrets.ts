@@ -38,11 +38,25 @@ export type Credentials = { account: string; password: string; emailVar: string;
 /**
  * Look up the password for `account` in the executor host's login Keychain.
  *
- * Returns null when there is no entry, which the caller reports as a clear
- * "no credentials on this host" rather than letting the suite skip with the
- * vaguer message it prints when the environment is simply empty.
+ * Verified to work from a LaunchAgent, which is how the executor runs: the
+ * agent lives in the user's GUI session, so the login keychain is unlocked and
+ * `security` reads the item without prompting. It does NOT work if nobody has
+ * logged in since boot -- the login keychain stays locked and every lookup
+ * fails, which is worth knowing before blaming the suite.
+ *
+ * Distinguishes "no such item" from "cannot read it", because the remedy is
+ * opposite: add the entry, versus unlock the keychain or grant access. Telling
+ * someone to add an item that already exists is the kind of advice that costs
+ * an hour.
  */
-export async function keychainPassword(account: string, service = KEYCHAIN_SERVICE): Promise<string | null> {
+export type KeychainResult =
+  | { ok: true; password: string }
+  | { ok: false; reason: "missing" | "denied"; detail: string };
+
+export async function keychainPassword(
+  account: string,
+  service = KEYCHAIN_SERVICE,
+): Promise<KeychainResult> {
   try {
     // -w prints ONLY the password; the account is not a secret, so passing it
     // as an argument is fine. The password is never an argument anywhere.
@@ -50,9 +64,20 @@ export async function keychainPassword(account: string, service = KEYCHAIN_SERVI
       timeout: 10_000,
     });
     const pw = stdout.replace(/\n$/, "");
-    return pw.length > 0 ? pw : null;
-  } catch {
-    return null; // no such item, or no Keychain on this host
+    return pw.length > 0
+      ? { ok: true, password: pw }
+      : { ok: false, reason: "missing", detail: "the keychain item is empty" };
+  } catch (e) {
+    const err = e as { stderr?: string; message?: string };
+    const text = `${err.stderr ?? ""} ${err.message ?? ""}`;
+    // "The specified item could not be found in the keychain." is the miss;
+    // anything else -- a locked keychain, a denied ACL -- is a read failure.
+    const missing = /could not be found/i.test(text);
+    return {
+      ok: false,
+      reason: missing ? "missing" : "denied",
+      detail: (err.stderr ?? err.message ?? "unknown").trim().slice(0, 200),
+    };
   }
 }
 

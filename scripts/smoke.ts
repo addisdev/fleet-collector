@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
 import { fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial } from "../src/targets.js";
 import { evalMatch } from "../src/match.js";
-import { redact } from "../src/secrets.js";
+import { redact, keychainPassword } from "../src/secrets.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
@@ -1485,6 +1485,13 @@ console.log(`smoke against ${BASE}`);
   // A short string would match half the log; better to leave it than to redact
   // everything into uselessness.
   check("a too-short secret is not used as a scrub pattern", redact("a b c", ["b"]) === "a b c");
+
+  // A missing item and an unreadable one need opposite remedies -- add the
+  // entry, versus unlock the keychain. Telling someone to add an item that
+  // already exists is the kind of advice that costs an hour.
+  const absent = await keychainPassword(`nobody-${run}@example.invalid`, `fleet-absent-${run}`);
+  check("a missing keychain item reports as missing",
+    absent.ok === false && absent.reason === "missing", JSON.stringify(absent));
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

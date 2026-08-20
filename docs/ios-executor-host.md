@@ -69,6 +69,17 @@ security add-generic-password -s fleet-ui-test -a showcase@greenfol.io -w
 world-readable via `ps`. The same reasoning as greenfolio's own
 `ci/set-test-credentials.sh`.
 
+Reading it from the executor works because a LaunchAgent runs inside your GUI
+session, where the login keychain is already unlocked -- verified with a probe
+agent, not assumed. It does **not** work if nobody has logged in since boot:
+the login keychain stays locked and every lookup fails. The executor says which
+of the two it hit, because the remedies are opposite:
+
+```
+no Keychain item for X ... add one with: security add-generic-password ...
+the Keychain item for X exists but could not be read ... locked, or not allowed
+```
+
 The job then names only the account:
 
 ```json

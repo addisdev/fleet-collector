@@ -314,6 +314,40 @@ async function selectTargets(job: Job, all: Target[]): Promise<Target[]> {
   return out;
 }
 
+
+/**
+ * Resolve a suite's sign-in details, or explain precisely why it cannot.
+ *
+ * Shared by both UI-test paths. It used to live only in the XCUITest branch,
+ * which meant a Maestro job could set `suite.credentials`, have the collector
+ * accept it, and get no sign-in and no error -- the field looked like it should
+ * work and silently did nothing, which is the same green-but-vacuous failure
+ * this whole mechanism exists to remove.
+ */
+async function resolveCredentials(suite: NonNullable<Job["suite"]>, who: string): Promise<{
+  account: string; password: string; emailVar: string; passwordVar: string;
+} | null> {
+  const cred = suite.credentials;
+  if (!cred?.account) return null;
+  const got = await keychainPassword(cred.account);
+  if (!got.ok) {
+    throw new Error(
+      got.reason === "missing"
+        ? `no Keychain item for ${cred.account} (service "${KEYCHAIN_SERVICE}") on ${who}; add one with: ` +
+          `security add-generic-password -s ${KEYCHAIN_SERVICE} -a ${cred.account} -w`
+        : `the Keychain item for ${cred.account} exists on ${who} but could not be read (${got.detail}); ` +
+          "the login keychain is locked, or this agent is not allowed to read it",
+    );
+  }
+  log(`signing in as ${cred.account} (password from the ${who} Keychain)`);
+  return {
+    account: cred.account,
+    password: got.password,
+    emailVar: cred.email_var ?? "GREENFOLIO_TEST_EMAIL",
+    passwordVar: cred.password_var ?? "GREENFOLIO_TEST_PASSWORD",
+  };
+}
+
 // XCUITest path: booted simulators and physical devices paired with this Mac.
 // A physical device additionally needs a signed test bundle -- xcodebuild will
 // say so plainly, and the diagnostics in the log artifact carry that message.
@@ -337,23 +371,7 @@ async function runXcuitest(job: Job) {
   // account skips every test that touches one -- greenfolio's skips 8 of 12 --
   // so this is the difference between a nightly that tests the app and a
   // nightly that tests that the app launches.
-  const cred = suite.credentials;
-  const emailVar = cred?.email_var ?? "GREENFOLIO_TEST_EMAIL";
-  const passwordVar = cred?.password_var ?? "GREENFOLIO_TEST_PASSWORD";
-  let password: string | null = null;
-  if (cred?.account) {
-    password = await keychainPassword(cred.account);
-    if (!password) {
-      // Said plainly, because the alternative is a suite that skips with the
-      // vaguer "no credentials in the environment" and looks like a fixture
-      // problem in the app rather than a missing Keychain item on this host.
-      throw new Error(
-        `no Keychain password for ${cred.account} (service "${KEYCHAIN_SERVICE}") on ${NAME}; ` +
-        `add one with: security add-generic-password -s ${KEYCHAIN_SERVICE} -a ${cred.account} -w`,
-      );
-    }
-    log(`signing in as ${cred.account} (password from the ${NAME} Keychain)`);
-  }
+  const creds = await resolveCredentials(suite, NAME);
 
   const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === "ios"));
   if (targets.length === 0) throw new Error("no iOS targets matched this job");
@@ -404,10 +422,10 @@ async function runXcuitest(job: Job) {
               // variable to the test runner process -- which is where
               // ProcessInfo.processInfo.environment is read, and from there the
               // suite forwards it into the app's launchEnvironment.
-              ...(cred?.account && password
+              ...(creds
                 ? {
-                    [`TEST_RUNNER_${emailVar}`]: cred.account,
-                    [`TEST_RUNNER_${passwordVar}`]: password,
+                    [`TEST_RUNNER_${creds.emailVar}`]: creds.account,
+                    [`TEST_RUNNER_${creds.passwordVar}`]: creds.password,
                   }
                 : {}),
             },
@@ -450,7 +468,7 @@ async function runXcuitest(job: Job) {
       // environment in places, and the log is downloadable from the dashboard,
       // so a password that reaches the store has leaked however carefully it
       // was fetched.
-      const secrets = password ? [password] : [];
+      const secrets = creds ? [creds.password] : [];
       full = redact(full, secrets);
       logTail = redact(logTail, secrets);
       const diagnostics = xcodebuildDiagnostics(full);
@@ -485,6 +503,11 @@ async function runUiTest(job: Job) {
   if (!suite.flows) throw new Error("maestro suite needs flows");
   const flows = path.resolve(FLOWS_DIR, suite.flows);
   if (!existsSync(flows)) throw new Error(`flows not found: ${flows}`);
+
+  // Maestro takes `-e KEY=value` and a flow reads it as ${KEY}, which is how a
+  // flow types into a login form. Same Keychain, same rule: the job names the
+  // account, the password never leaves this host.
+  const creds = await resolveCredentials(suite, NAME);
 
   const targets = await selectTargets(job, await listTargets());
   if (targets.length === 0) throw new Error("no targets attached");
@@ -540,7 +563,11 @@ async function runUiTest(job: Job) {
       await exec(
         MAESTRO,
         ["--device", serial, "test", "--format", "junit", "--output", report,
-         ...(appId ? ["-e", `APP_ID=${appId}`] : []), flows],
+         ...(appId ? ["-e", `APP_ID=${appId}`] : []),
+         ...(creds
+           ? ["-e", `${creds.emailVar}=${creds.account}`, "-e", `${creds.passwordVar}=${creds.password}`]
+           : []),
+         flows],
         { timeout: 600_000 },
       );
     } catch {
@@ -552,7 +579,11 @@ async function runUiTest(job: Job) {
     let failed = 1;
     const artifacts: string[] = [];
     if (!failedToRun && existsSync(report)) {
-      ({ passed, failed } = parseJunit(readFileSync(report, "utf8")));
+      const xml = readFileSync(report, "utf8");
+      ({ passed, failed } = parseJunit(xml));
+      // Scrub before upload: a failing step echoes the command it ran, and the
+      // report is downloadable from the dashboard.
+      if (creds) writeFileSync(report, redact(xml, [creds.password]));
       artifacts.push(await uploadArtifact(report, `${job.job_id}-${serial}-junit.xml`));
     }
     if (failed > 0) allOk = false;
