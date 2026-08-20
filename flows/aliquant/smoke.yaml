@@ -1,0 +1,21 @@
+# Aliquant launch: the app opens on its intro and offers the way forward.
+#
+# The intro copy is the product's actual claim -- buckets laid over real
+# balances -- so asserting a phrase from it proves the screen rendered its
+# content and not just a frame. Kept to a short fragment: the full paragraph
+# is marketing copy and will be reworded long before the screen changes.
+appId: ${APP_ID}
+---
+- clearState
+- launchApp
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+- extendedWaitUntil:
+    visible: "Aliquant"
+    timeout: 20000
+- assertVisible: "Get started"
+- assertVisible:
+    text: ".*bank login.*"
