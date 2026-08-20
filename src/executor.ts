@@ -8,6 +8,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } fro
 import os from "node:os";
 import path from "node:path";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "./xcparse.js";
+import { fleetOwned } from "./targets.js";
 
 const exec = promisify(execFile);
 
@@ -791,7 +792,10 @@ async function runWebTest(job: Job) {
  * without one can never be selected by `os ~ 'android'` -- it would show up on
  * the dashboard and silently never be given work.
  */
-async function describeTarget(t: Target): Promise<Record<string, unknown>> {
+async function describeTarget(
+  t: Target,
+  sims: Record<string, { udid: string; name: string }[]> | null,
+): Promise<Record<string, unknown>> {
   if (t.platform === "android") {
     const prop = async (k: string) => {
       try {
@@ -826,9 +830,7 @@ async function describeTarget(t: Target): Promise<Record<string, unknown>> {
   // untargetable -- `os ~ 'ios-18'` matches nothing without the version, and
   // every simulator would look identical on the dashboard.
   try {
-    const { stdout } = await exec("xcrun", ["simctl", "list", "devices", "-j"], { timeout: 20_000 });
-    const parsed = JSON.parse(stdout) as { devices: Record<string, { udid: string; name: string }[]> };
-    for (const [runtime, list] of Object.entries(parsed.devices)) {
+    for (const [runtime, list] of Object.entries(sims ?? {})) {
       const hit = list.find((d) => d.udid === t.id);
       if (!hit) continue;
       // "com.apple.CoreSimulator.SimRuntime.iOS-18-4" -> "ios-18.4"
@@ -838,6 +840,7 @@ async function describeTarget(t: Target): Promise<Record<string, unknown>> {
         os: v ? `ios-${v}` : "ios",
         serial: t.id,
         attached_to: NAME,
+        // simctl knows it, so it is a simulator whichever enumerator found it.
         kind: "simulator",
         // Belt and braces for isSimulator(), which reads model/os/soc: a
         // simulator that slips past that check lands in a hardware comparison,
@@ -846,7 +849,7 @@ async function describeTarget(t: Target): Promise<Record<string, unknown>> {
       };
     }
   } catch {
-    // No Xcode tooling, or simctl changed its output shape.
+    // simctl changed its output shape.
   }
   return { model: t.kind === "simulator" ? "simulator" : "iphone", os: "ios", serial: t.id, attached_to: NAME, kind: t.kind };
 }
@@ -863,23 +866,53 @@ async function describeTarget(t: Target): Promise<Record<string, unknown>> {
  * Best effort by design -- presence must never be the reason an executor stops
  * claiming work, so failures here are swallowed.
  */
+let reporting = false;
+
 async function reportAttached() {
-  let targets: Target[] = [];
+  // Per-device work is bounded only by timeouts -- 10s per adb getprop against
+  // a wedged phone -- so a sweep can outlast the interval that scheduled it.
+  // Without this guard those runs overlap and compound adb contention against
+  // a device an actual job may be driving.
+  if (reporting) return;
+  reporting = true;
   try {
-    targets = await listTargets();
-  } catch {
-    return;
-  }
-  for (const t of targets) {
+    let targets: Target[] = [];
     try {
-      await fetch(`${BASE}/devices/register`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ device_id: t.id, descriptor: await describeTarget(t), pools: [] }),
-      });
+      targets = await listTargets();
     } catch {
-      // Next tick will try again.
+      return;
     }
+
+    // One listing per sweep, not one per simulator.
+    let sims: Record<string, { udid: string; name: string }[]> | null = null;
+    if (targets.some((t) => t.platform === "ios")) {
+      try {
+        const { stdout } = await exec("xcrun", ["simctl", "list", "devices", "-j"], { timeout: 20_000 });
+        sims = (JSON.parse(stdout) as { devices: Record<string, { udid: string; name: string }[]> }).devices;
+      } catch {
+        sims = null; // no Xcode tooling; describeTarget falls back
+      }
+    }
+
+    // devicectl and simctl can both report the same UDID, so without this the
+    // device is registered twice a sweep with a different `kind` each time.
+    const seen = new Set<string>();
+    for (const t of targets) {
+      if (seen.has(t.id)) continue;
+      seen.add(t.id);
+      if (!fleetOwned(t.id, sims)) continue;
+      try {
+        await fetch(`${BASE}/devices/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ device_id: t.id, descriptor: await describeTarget(t, sims), pools: [] }),
+        });
+      } catch {
+        // Next tick will try again.
+      }
+    }
+  } finally {
+    reporting = false;
   }
 }
 

@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
+import { fleetOwned } from "../src/targets.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
@@ -1318,6 +1319,28 @@ console.log(`smoke against ${BASE}`);
   const all = (await json("GET", "/api/devices?limit=500")).body?.devices ?? [];
   check("re-registering refreshes rather than duplicates",
     all.filter((d: any) => d.device_id === SHELF).length === 1, "duplicate device row");
+
+  // Which attached things may join the fleet at all.
+  {
+    const SIMS = {
+      "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+        { udid: "AB0637DA-212F-4E29-AE5F-26EA006BC168", name: "fleet-iphone-1" },
+        { udid: "A92E6FCA-7A8C-4255-ADA2-AF835850A259", name: "iPhone 16 Pro" },
+      ],
+    };
+    check("a fleet simulator joins", fleetOwned("AB0637DA-212F-4E29-AE5F-26EA006BC168", SIMS));
+    // The Xcode Mac is a workstation. A simulator someone booted for five
+    // minutes of debugging must not quietly start taking nightly work.
+    check("a scratch simulator does not join", !fleetOwned("A92E6FCA-7A8C-4255-ADA2-AF835850A259", SIMS));
+    // devicectl also lists booted simulators as connected devices, so the same
+    // UDID arrives a second time labelled a device. Deciding by that label let
+    // the scratch simulator straight through -- observed on the real host.
+    check("a simulator is still rejected when reported as a device",
+      !fleetOwned("A92E6FCA-7A8C-4255-ADA2-AF835850A259", SIMS));
+    // Real hardware simctl has never heard of is in: somebody cabled it up.
+    check("a cabled phone joins", fleetOwned("988a1b3541354f565a", SIMS));
+    check("a phone joins even with no simctl at all", fleetOwned("988a1b3541354f565a", null));
+  }
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
