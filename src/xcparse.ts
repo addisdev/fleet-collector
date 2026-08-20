@@ -50,7 +50,14 @@ export function countXcodebuildTests(out: string): { passed: number; failed: num
  * capturing diagnostics at all was meant to remove.
  */
 export function xcodebuildDiagnostics(out: string, cap = 100): string[] {
-  const all = out.match(/^(?:\S.*?:\d+:\d+:\s*)?(?:error|warning):.*$/gm) ?? [];
+  // The column is OPTIONAL, and that is not a detail. A compiler diagnostic is
+  // `File.swift:90:23: warning:` but an XCTest FAILURE is `File.swift:228:
+  // error: -[Suite testFoo] : failed - ...` with no column at all. Requiring
+  // one dropped every test failure from the artifact -- the single line most
+  // worth reading -- while faithfully preserving a hundred deprecation
+  // warnings. Observed on a real run: 10 passed, 1 failed, and the artifact
+  // reported zero errors.
+  const all = out.match(/^(?:\S.*?:\d+(?::\d+)?:\s*)?(?:error|warning):.*$/gm) ?? [];
   const errors = all.filter((l) => /(?:^|\s)error:/.test(l));
   const warnings = all.filter((l) => !/(?:^|\s)error:/.test(l));
   return [...errors.slice(0, cap), ...warnings.slice(0, cap)];

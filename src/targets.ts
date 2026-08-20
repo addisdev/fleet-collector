@@ -120,3 +120,17 @@ export function iosNotReadyReason(d: IosDeviceInfo): string | null {
   return `${name} is paired but not reachable (transport=${d.transport}, tunnel=${d.tunnelState}) -- ` +
     "it is not on the network, or is asleep";
 }
+
+/**
+ * Should a failing `adb devices` be reported, or is it simply absent?
+ *
+ * ENOENT is the iOS-only host: no Android SDK, no Android devices, nothing
+ * worth saying every 60 seconds. Anything else means adb IS installed and is
+ * failing -- a version-mismatched daemon, a dead server -- and staying quiet
+ * about that empties the entire Android shelf silently. Every cabled phone
+ * reads offline and jobs fail with "no android targets matched this job",
+ * which sends you looking at match expressions instead of at adb.
+ */
+export function adbFailureIsWorthReporting(code: string | undefined): boolean {
+  return code !== "ENOENT";
+}
