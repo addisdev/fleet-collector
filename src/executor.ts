@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { countXcodebuildTests } from "./xcparse.js";
+import { countXcodebuildTests, xcodebuildDiagnostics } from "./xcparse.js";
 
 const exec = promisify(execFile);
 
@@ -312,17 +312,7 @@ async function runXcuitest(job: Job) {
       // The tail alone is not enough to diagnose a build failure: xcodebuild
       // prints thousands of lines of compile commands after the error, so the
       // last 4000 characters are reliably the least useful 4000 characters.
-      // Lead with the diagnostics instead.
-      //
-      // Errors first, and only then warnings. Taking the first N in document
-      // order looks equivalent and is not: an Xcode build routinely emits
-      // hundreds of deprecation warnings, and with 250 of them ahead of it the
-      // one `error:` line falls outside the cap -- reintroducing exactly the
-      // blindness this block exists to remove.
-      const allDiagnostics = full.match(/^.*(?:error|warning):.*$/gm) ?? [];
-      const errors = allDiagnostics.filter((l) => l.includes("error:"));
-      const warnings = allDiagnostics.filter((l) => !l.includes("error:"));
-      const diagnostics = [...errors.slice(0, 100), ...warnings.slice(0, 100)];
+      const diagnostics = xcodebuildDiagnostics(full);
       const logFile = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-xc-")), "xcodebuild.log");
       writeFileSync(
         logFile,

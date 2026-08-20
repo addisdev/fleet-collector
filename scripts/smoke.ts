@@ -3,7 +3,7 @@
 // Usage: npm run smoke   (collector must be running on FLEET_URL, default :8788)
 import { createHash } from "node:crypto";
 
-import { countXcodebuildTests } from "../src/xcparse.js";
+import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
@@ -1251,6 +1251,29 @@ console.log(`smoke against ${BASE}`);
   check("one survivor among skips is not a pass", majoritySkipped({ passed: 1, failed: 0, skipped: 15 }));
   // A healthy suite with a couple of legitimately-skipped cases still passes.
   check("a few skips in a healthy suite still pass", !majoritySkipped({ passed: 14, failed: 0, skipped: 2 }));
+
+  // What the failure artifact leads with. Both of these were real defects.
+  {
+    // Real xcodebuild output echoes source, and `error:` is an ordinary Swift
+    // argument label -- so a loose match reads this line as a build error.
+    const echoed = "        try? outbox.markFailed(op, error: OutboxDeliveryError.undeliverablePayload,";
+    const real = "error: Build input files cannot be found: LeaderboardRepository.swift";
+    const d = xcodebuildDiagnostics([echoed, real, "/x/F.swift:9:1: warning: deprecated"].join("\n"));
+    check("echoed source is not mistaken for a diagnostic", !d.some((l) => l.includes("markFailed")),
+      JSON.stringify(d));
+    check("both diagnostic shapes are captured", d.length === 2, JSON.stringify(d));
+
+    // An Xcode build routinely emits hundreds of deprecation warnings. Taking
+    // the first N in document order pushes the one error off the end.
+    const noisy = [
+      ...Array.from({ length: 250 }, (_, i) => `/x/F${i}.swift:1:1: warning: deprecated`),
+      real,
+    ].join("\n");
+    const capped = xcodebuildDiagnostics(noisy);
+    check("the error survives a log full of warnings", capped.some((l) => l.startsWith("error:")),
+      `kept ${capped.length}, first=${capped[0]?.slice(0, 40)}`);
+    check("errors come before warnings", capped[0] === real, capped[0]?.slice(0, 60));
+  }
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
