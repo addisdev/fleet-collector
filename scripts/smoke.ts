@@ -1370,6 +1370,22 @@ console.log(`smoke against ${BASE}`);
     check("an emulator serial is recognised as virtual", isAndroidEmulatorSerial("emulator-5554"));
     check("a phone serial is not", !isAndroidEmulatorSerial("988a1b3541354f565a"));
     check("a scratch AVD does not join", !fleetOwned("jerv-test"));
+
+    // Membership must gate JOBS, not only presence. It gated only presence,
+    // and the gap was invisible until an aliquant suite pinned to simulators
+    // ran on fleet-sim-1 AND on a stray iPhone 17 somebody had booted --
+    // reporting both as results. "It cannot be registered" and "it cannot be
+    // given work" are different claims.
+    const bootedOnTheHost = [
+      { udid: "1C733669", name: "fleet-sim-1" },
+      { udid: "500582F9", name: "iPhone 17" },
+    ];
+    const sims = { "com.apple.CoreSimulator.SimRuntime.iOS-26-5": bootedOnTheHost };
+    const selectable = bootedOnTheHost.filter((d) => fleetOwned(simulatorName(d.udid, sims)));
+    check("a job runs only on fleet-owned simulators", selectable.length === 1,
+      JSON.stringify(selectable.map((d) => d.name)));
+    check("the stray simulator is the one excluded", selectable[0]?.name === "fleet-sim-1",
+      String(selectable[0]?.name));
     check("a fleet AVD joins", fleetOwned("fleet-pixel-8"));
   }
 
