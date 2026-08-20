@@ -1276,5 +1276,49 @@ console.log(`smoke against ${BASE}`);
   }
 }
 
+// 33. shelf presence: a host-driven device exists and reads online
+{
+  // What the host executor now sends every 60s for each attached device. The
+  // descriptor is the point: a device registered without one shows on the
+  // dashboard and can never be selected by `os ~ 'android'`, so it would sit
+  // there looking healthy and never be given work.
+  const SHELF = `smoke-shelf-${run}`;
+  const reg = await json("POST", "/devices/register", {
+    device_id: SHELF,
+    descriptor: { model: "SM-G955U1", os: "android-9", ram_mb: 3800, serial: SHELF, attached_to: `exec-${run}` },
+    pools: [],
+  });
+  check("an executor can register an attached device", reg.status === 200 || reg.status === 201, `status ${reg.status}`);
+
+  const listed = (await json("GET", "/api/devices?limit=500")).body?.devices
+    ?.find((d: any) => d.device_id === SHELF);
+  // The bug this fixes: a cabled phone read `offline` between jobs because
+  // nothing refreshed it -- it has no runner app of its own to beacon.
+  check("an attached device reads online", listed?.status === "online", JSON.stringify(listed?.status));
+
+  // And it must be targetable, not merely visible.
+  const JOB = `smoke-shelf-job-${run}`;
+  const made = await json("POST", "/jobs", {
+    schema: 1, job_id: JOB, workload: "ui-test", executor: "host",
+    app: { name: "x", build: "1", sha256: "deadbeef" },
+    suite: { kind: "maestro", flows: "x.yaml", app_id: "com.x" },
+    targets: { match: "os ~ 'android'", executor: `exec-${run}` },
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a host job targeting android is accepted", made.status === 201, `status ${made.status}`);
+  const claim = await json("GET", `/executor/next-job?name=exec-${run}`);
+  check("an executor-registered device is targetable by match", claim.body?.job_id === JOB,
+    JSON.stringify(claim.body?.job_id));
+  await json("POST", `/api/jobs/${JOB}/cancel`, {});
+
+  // Re-registering is how presence stays fresh, so it must not duplicate.
+  await json("POST", "/devices/register", {
+    device_id: SHELF, descriptor: { model: "SM-G955U1", os: "android-9", serial: SHELF }, pools: [],
+  });
+  const all = (await json("GET", "/api/devices?limit=500")).body?.devices ?? [];
+  check("re-registering refreshes rather than duplicates",
+    all.filter((d: any) => d.device_id === SHELF).length === 1, "duplicate device row");
+}
+
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
