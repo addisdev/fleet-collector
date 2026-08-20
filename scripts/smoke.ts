@@ -1100,5 +1100,99 @@ console.log(`smoke against ${BASE}`);
   check("a browser is not enrolled as a device", !ghost, "a web: pseudo-device leaked into the device list");
 }
 
+// 31. build channels: a nightly asks for the latest build, not a pinned hash
+{
+  const APP = `smoke-app-${run}`;
+  const put = async (bytes: string, build: string) =>
+    (await (await fetch(`${BASE}/artifacts`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-artifact-name": `${build}.apk`,
+        "x-artifact-app": APP,
+        "x-artifact-build": build,
+        "x-artifact-platform": "android",
+      },
+      body: bytes,
+    })).json()) as { sha256: string };
+
+  const older = await put(`older-${run}`, "1.0.0");
+  const newer = await put(`newer-${run}`, "1.1.0");
+  check("an artifact can declare which app it is", !!older.sha256 && !!newer.sha256);
+
+  // A schedule that fires with sha256: "latest" must resolve to the newest
+  // build for that app -- the whole point is that nobody edits a hash.
+  const SCHED = `smoke-latest-${run}`;
+  await json("POST", "/schedules", {
+    id: SCHED,
+    // Every minute, so the tick below always considers it due.
+    cron: "* * * * *",
+    enabled: true,
+    template: {
+      schema: 1, workload: "install", executor: "host",
+      app: { name: APP, build: "latest", sha256: "latest" },
+      targets: { executor: `never-${run}` },
+      lease: { ttl_s: 600, max_attempts: 1 },
+    },
+  });
+  const tick = await json("POST", "/schedules/tick", {});
+  const jobId = (tick.body?.fired ?? []).find((j: string) => j.startsWith(SCHED));
+  check("a schedule with a latest build fires", !!jobId, JSON.stringify(tick.body?.fired));
+
+  const fired = await json("GET", `/api/jobs/${jobId}`);
+  const spec = fired.body?.spec ?? {};
+  check("latest resolves to the newest build", spec.app?.sha256 === newer.sha256,
+    `${spec.app?.sha256} (newer=${newer.sha256} older=${older.sha256})`);
+  check("the resolved build string is recorded, not the word 'latest'", spec.app?.build === "1.1.0",
+    JSON.stringify(spec.app?.build));
+
+  // A nightly for an app nobody has built yet must be SKIPPED, not failed: a
+  // job pinned to a build that does not exist would fail in a way that looks
+  // exactly like the app being broken.
+  const EMPTY = `smoke-nobuild-${run}`;
+  await json("POST", "/schedules", {
+    id: EMPTY, cron: "* * * * *", enabled: true,
+    template: {
+      schema: 1, workload: "install", executor: "host",
+      app: { name: `never-built-${run}`, build: "latest", sha256: "latest" },
+      targets: { executor: `never-${run}` }, lease: { ttl_s: 600, max_attempts: 1 },
+    },
+  });
+  const tick2 = await json("POST", "/schedules/tick", {});
+  const firedEmpty = (tick2.body?.fired ?? []).some((j: string) => j.startsWith(EMPTY));
+  check("a nightly with no build is skipped, not failed", !firedEmpty, JSON.stringify(tick2.body?.fired));
+
+  // A revert republishes bytes that already exist, so the insert is ignored and
+  // the row keeps its ORIGINAL created_at -- which made `latest` resolve to the
+  // build the revert replaced. published_at is what makes this come out right.
+  await put(`older-${run}`, "1.2-revert");
+  const REVERT = `smoke-revert-${run}`;
+  await json("POST", "/jobs", {
+    schema: 1, job_id: REVERT, workload: "install", executor: "host",
+    app: { name: APP, build: "latest", sha256: "latest" },
+    targets: { executor: `never-${run}` }, lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  const reverted = await json("GET", `/api/jobs/${REVERT}`);
+  check("a revert republishing older bytes becomes the latest build",
+    reverted.body?.spec?.app?.build === "1.2-revert", JSON.stringify(reverted.body?.spec?.app?.build));
+
+  // `latest` is the documented contract for hand-written and CI jobs too, not
+  // a scheduler-only convenience.
+  check("POST /jobs resolves latest, never storing the literal string",
+    reverted.body?.spec?.app?.sha256 === older.sha256, JSON.stringify(reverted.body?.spec?.app?.sha256));
+
+  const GHOST = `smoke-ghost-${run}`;
+  const ghost = await json("POST", "/jobs", {
+    schema: 1, job_id: GHOST, workload: "install", executor: "host",
+    app: { name: `never-built-${run}`, build: "latest", sha256: "latest" },
+    targets: { executor: `never-${run}` }, lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a job asking for a build nobody has published is rejected", ghost.status === 400,
+    `status ${ghost.status}`);
+
+  for (const id of [SCHED, EMPTY]) await json("DELETE", `/schedules/${id}`, undefined);
+  for (const j of [jobId, REVERT]) if (j) await json("POST", `/api/jobs/${j}/cancel`, {});
+}
+
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

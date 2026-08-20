@@ -1,4 +1,4 @@
-# EXAMPLE ONLY — not installed anywhere. Fleet CI integration is OFF.
+# Per-PR device test. Copy into an app repo as .github/workflows/. See README.md.
 #
 # When (and only when) the fleet gets connected to real CI, a workflow like
 # this goes into an app repo (e.g. greenfolio-android). Until then this file

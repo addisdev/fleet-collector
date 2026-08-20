@@ -62,6 +62,9 @@ type JobSpec = {
   workload: string;
   executor: "device" | "host";
   fanout?: boolean;
+  // `sha256: "latest"` is resolved at enqueue time to the newest build uploaded
+  // under this app name -- see resolveLatestBuild.
+  app?: { name?: string; build?: string; sha256?: string; platform?: string };
   targets?: {
     pool?: string;
     match?: string;
@@ -299,10 +302,18 @@ app.get("/executor/next-job", async (req, reply) => {
 // --- jobs ---
 
 app.post("/jobs", async (req, reply) => {
-  const spec = req.body as JobSpec;
+  let spec = req.body as JobSpec;
   if (spec?.schema !== 1) return reply.code(400).send({ error: "schema must be 1" });
   if (!spec.job_id) return reply.code(400).send({ error: "job_id required" });
   if (!WORKLOADS.has(spec.workload)) return reply.code(400).send({ error: `unknown workload: ${spec.workload}` });
+  // `latest` is the documented contract for CI and for hand-written jobs, not
+  // a scheduler-only convenience. Resolving here means a job posted directly
+  // is never pinned to a string that cannot name an artifact.
+  try {
+    spec = resolveLatestBuild(spec);
+  } catch (e) {
+    return reply.code(400).send({ error: String((e as Error).message ?? e) });
+  }
   if (spec.executor !== "device" && spec.executor !== "host")
     return reply.code(400).send({ error: "executor must be 'device' or 'host'" });
 
@@ -615,6 +626,39 @@ app.delete("/schedules/:id", async (req, reply) => {
   return { ok: true };
 });
 
+/**
+ * Resolve `app.sha256: "latest"` to the newest build uploaded for `app.name`.
+ *
+ * This is what stops a nightly from testing yesterday's code. A schedule that
+ * pins a literal hash tests that hash forever, which is how one of these spent
+ * six days guarding an APK older than the code it was meant to guard; a
+ * schedule that asks for "latest" tests whatever CI pushed most recently.
+ *
+ * Throws when there is nothing to test, rather than enqueueing a job pinned to
+ * a build that does not exist.
+ */
+function resolveLatestBuild(spec: JobSpec): JobSpec {
+  if (spec.app?.sha256 !== "latest") return spec;
+  const appName = spec.app?.name;
+  if (!appName) throw new Error("app.sha256 is 'latest' but app.name is missing");
+  const row = db
+    .prepare(
+      `SELECT sha256, build FROM artifacts WHERE app = ?
+       ORDER BY COALESCE(publish_seq, rowid) DESC LIMIT 1`,
+    )
+    .get(appName) as { sha256: string; build: string | null } | undefined;
+  if (!row) throw new Error(`no build has been uploaded for ${appName}`);
+  // Record the build string the artifact carries, so a result says which build
+  // actually ran. Falling back to the template's build would write the literal
+  // word "latest" into the result, which is untraceable to any commit; the
+  // short hash is at least a real answer.
+  const templateBuild = spec.app.build === "latest" ? undefined : spec.app.build;
+  return {
+    ...spec,
+    app: { ...spec.app, sha256: row.sha256, build: row.build ?? templateBuild ?? row.sha256.slice(0, 12) },
+  };
+}
+
 // Fire due schedules for the current minute (at most once per minute each).
 // Enqueues through POST /jobs via inject so fanout and validation apply.
 async function schedulerTick(now = new Date()): Promise<string[]> {
@@ -626,9 +670,20 @@ async function schedulerTick(now = new Date()): Promise<string[]> {
   for (const s of due) {
     db.prepare("UPDATE schedules SET last_run = ? WHERE id = ?").run(key, s.id);
     const jobId = `${s.id}-${key.replace(/[^0-9]/g, "")}`;
+    let payload: Record<string, unknown>;
+    try {
+      payload = resolveLatestBuild(JSON.parse(s.template) as JobSpec) as Record<string, unknown>;
+    } catch (e) {
+      // No build to test is not a red nightly -- it is a nightly that did not
+      // run. Firing it anyway against a hash that resolves to nothing would
+      // produce a failure that looks like the app is broken.
+      app.log.warn({ schedule: s.id, reason: String(e) }, "schedule skipped");
+      announce({ type: "schedule", event: "skipped", id: s.id, reason: String((e as Error).message ?? e) });
+      continue;
+    }
     const res = await app.inject({
       method: "POST", url: "/jobs",
-      payload: { ...JSON.parse(s.template), job_id: jobId },
+      payload: { ...payload, job_id: jobId },
     });
     if (res.statusCode === 201) fired.push(jobId);
     else if (res.statusCode !== 409)
@@ -694,11 +749,31 @@ app.post("/artifacts", async (req, reply) => {
   else await rename(tmp, dest);
 
   const name = (req.headers["x-artifact-name"] as string | undefined) ?? null;
+  // Which app this build IS. Optional, because an artifact can still be an
+  // anonymous blob, but a build that says so can be found by a nightly without
+  // anyone pinning its hash.
+  const app_ = (req.headers["x-artifact-app"] as string | undefined) ?? null;
+  const build = (req.headers["x-artifact-build"] as string | undefined) ?? null;
+  const platform = (req.headers["x-artifact-platform"] as string | undefined) ?? null;
   db.prepare(
-    "INSERT OR IGNORE INTO artifacts (sha256, name, size) VALUES (?, ?, ?)",
-  ).run(sha256, name, size);
-  announce({ type: "artifact", sha256, name, size });
-  return reply.code(201).send({ ok: true, sha256, size });
+    "INSERT OR IGNORE INTO artifacts (sha256, name, size, app, build, platform) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(sha256, name, size, app_, build, platform);
+  // Content-addressing means re-uploading identical bytes is an ignored insert,
+  // so a revert that republishes an earlier build would otherwise keep that
+  // build's original created_at and sort BEHIND the build it just replaced.
+  // Stamping published_at is what makes `latest` mean "most recently
+  // published" rather than "first seen".
+  if (app_) {
+    db.prepare(
+      `UPDATE artifacts
+          SET app = ?, build = COALESCE(?, build), platform = COALESCE(?, platform),
+              published_at = datetime('now'),
+              publish_seq = (SELECT COALESCE(MAX(publish_seq), 0) + 1 FROM artifacts)
+        WHERE sha256 = ?`,
+    ).run(app_, build, platform, sha256);
+  }
+  announce({ type: "artifact", sha256, name, size, app: app_, build });
+  return reply.code(201).send({ ok: true, sha256, size, app: app_, build });
 });
 
 app.get("/artifacts/:sha256", async (req, reply) => {

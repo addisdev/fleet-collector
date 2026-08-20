@@ -184,6 +184,43 @@ for (const [column, ddl] of [
   if (!jobColumns.has(column)) db.exec(`ALTER TABLE jobs ADD COLUMN ${ddl}`);
 }
 
+// An artifact used to be an anonymous blob: a hash, a filename and a size. That
+// is why a nightly had to pin a literal sha256 by hand, and why one of them
+// spent six days testing an APK older than the code it was meant to guard.
+// Recording which app and build an artifact IS lets a schedule ask for the
+// latest one instead of a hash somebody has to remember to update.
+const artifactColumns = new Set(
+  (db.prepare("PRAGMA table_info(artifacts)").all() as { name: string }[]).map((c) => c.name),
+);
+for (const [column, ddl] of [
+  ["app", "app TEXT"],
+  ["build", "build TEXT"],
+  ["platform", "platform TEXT"],
+  // NOT created_at. The store is content-addressed, so re-uploading bytes that
+  // already exist is an ignored insert and created_at keeps its original value
+  // -- which means a revert that republishes an earlier build looks OLDER than
+  // the build it just replaced, and `latest` resolves to the wrong one.
+  // published_at is when this content was last claimed by an app.
+  ["published_at", "published_at TEXT"],
+  // And publish_seq is what `latest` actually orders by. A timestamp cannot do
+  // it: datetime('now') is second-granular, so two publishes in the same second
+  // tie, and the only tiebreak left is rowid -- which for a content-addressed
+  // row is the order the BYTES were first seen, not the order they were
+  // published. That is precisely backwards for a revert. A counter has neither
+  // problem.
+  ["publish_seq", "publish_seq INTEGER"],
+] as const) {
+  if (!artifactColumns.has(column)) db.exec(`ALTER TABLE artifacts ADD COLUMN ${ddl}`);
+}
+// Existing rows predate the column; their upload time is the best available
+// answer and is correct for everything that was never republished.
+db.exec("UPDATE artifacts SET published_at = created_at WHERE published_at IS NULL");
+// Existing rows were never republished, so first-seen order IS publish order
+// for them; seed the counter from rowid so it stays monotonic from here.
+db.exec("UPDATE artifacts SET publish_seq = rowid WHERE publish_seq IS NULL");
+// The lookup a nightly does every time it fires.
+db.exec("CREATE INDEX IF NOT EXISTS idx_artifacts_app ON artifacts (app, publish_seq DESC)");
+
 // `nickname` was the wrong word: it implied a second label beside the id rather
 // than the device's name. Renamed in place so existing names carry over — this
 // must happen before the add-column loop below, or that loop would add an empty

@@ -31,7 +31,15 @@ if (ARTIFACT) {
   const body = readFileSync(ARTIFACT);
   const res = await fetch(`${BASE}/artifacts`, {
     method: "POST",
-    headers: { "content-type": "application/octet-stream", "x-artifact-name": ARTIFACT.split("/").pop()! },
+    // Tag the build with the app it belongs to, so a nightly can ask for the
+    // latest one instead of pinning a hash somebody has to remember to bump.
+    headers: {
+      "content-type": "application/octet-stream",
+      "x-artifact-name": ARTIFACT.split("/").pop()!,
+      ...(spec.app?.name ? { "x-artifact-app": String(spec.app.name) } : {}),
+      ...(spec.app?.build ? { "x-artifact-build": String(spec.app.build) } : {}),
+      ...(spec.app?.platform ? { "x-artifact-platform": String(spec.app.platform) } : {}),
+    },
     body,
   });
   if (!res.ok) fail(`artifact upload -> HTTP ${res.status}`);
