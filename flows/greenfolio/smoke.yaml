@@ -1,11 +1,34 @@
-# GreenFolio smoke: app launches and renders a known screen.
-# Deliberately does NOT clearState — the emulator's logged-in session is the
-# fixture until the login flow is covered. Richer flows belong app-side
-# (greenfolio-android) once suites are versioned with the app; this flow
-# proves the ui-test rail.
-appId: com.taylab.greenfolio.debug
+# GreenFolio launch: the app opens on its signed-out gate and renders it.
+#
+# `clearState` on purpose, unlike the old version of this flow. That one relied
+# on whatever session the emulator happened to be carrying, which made the
+# result depend on the device's history rather than on the build -- and it
+# asserted on a signed-IN screen that the shelf device never reaches. Starting
+# from a known-empty state is the only way this means the same thing twice.
+#
+# appId comes from the job, not from here: the same flow has to cover .smoke
+# (what CI publishes), .debug (what a developer builds) and the release id.
+appId: ${APP_ID}
 ---
+- clearState
 - launchApp
+# First launch on a full Android image asks for notifications. ATD images
+# auto-grant, so this is conditional rather than a step.
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
 - extendedWaitUntil:
-    visible: "Plants|Blooms|Account|Pot labels|GreenFolio"
-    timeout: 15000
+    visible: "GreenFolio"
+    timeout: 20000
+# The gate itself, not just the title: a blank screen under a correct title is
+# how a broken build passes a launch test.
+- assertVisible: "Sign in to your collection"
+- assertVisible: "Email"
+- assertVisible: "Password"
+- assertVisible: "Sign in"
+# The EULA checkbox is part of the gate, and its absence would mean the app
+# shipped a sign-in that skips the terms.
+- assertVisible: "I agree to the Terms of Use"
+- assertVisible: "Create an account"

@@ -3,6 +3,8 @@
 // Usage: npm run smoke   (collector must be running on FLEET_URL, default :8788)
 import { createHash } from "node:crypto";
 
+import { countXcodebuildTests } from "../src/xcparse.js";
+
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
 
@@ -207,7 +209,14 @@ console.log(`smoke against ${BASE}`);
 
   await sleep(2500);
   const final = await json("POST", "/jobs/sweep");
-  check("sweep fails the job once attempts run out", final.body?.failed?.includes(LEASE_JOB), JSON.stringify(final.body));
+  // Assert the OUTCOME, not this particular sweep's return value. The collector
+  // runs its own sweep every SWEEP_MS, so it frequently gets there first and
+  // this call correctly reports nothing left to do -- which made the check fail
+  // on a job that had already been failed exactly as intended. A test that goes
+  // red when the system worked is the fastest way to teach people to ignore it.
+  const exhausted = final.body?.failed?.includes(LEASE_JOB) === true
+    || (await json("GET", `/jobs/${LEASE_JOB}`)).body?.status === "failed";
+  check("sweep fails the job once attempts run out", exhausted, JSON.stringify(final.body));
   const dead = await json("GET", `/jobs/${LEASE_JOB}`);
   check(
     "exhausted job ends failed, not requeued",
@@ -1192,6 +1201,56 @@ console.log(`smoke against ${BASE}`);
 
   for (const id of [SCHED, EMPTY]) await json("DELETE", `/schedules/${id}`, undefined);
   for (const j of [jobId, REVERT]) if (j) await json("POST", `/api/jobs/${j}/cancel`, {});
+}
+
+// 32. xcodebuild test counts: what ran, not what the exit code implied
+{
+  const log = [
+    "Test Suite 'GreeneryUITests' started at 2026-08-19 21:00:00.000",
+    "Test Case '-[GreeneryUITests.BloomsUITests testBloomAppears]' passed (1.2 seconds).",
+    "Test Case '-[GreeneryUITests.BloomsUITests testBloomDismisses]' failed (0.9 seconds).",
+    // An entirely ordinary test name that contains the word "failed". A naive
+    // substring count reads this as a failure; it passed.
+    "Test Case '-[GreeneryUITests.EULAGateUITests testFailedAcceptShowsBanner]' passed (0.4 seconds).",
+    "    XCTAssertTrue failed - the banner never appeared",
+    "** TEST FAILED **",
+  ].join("\n");
+  const c = countXcodebuildTests(log);
+  check("xcodebuild passes are counted", c.passed === 2, JSON.stringify(c));
+  check("xcodebuild failures are counted", c.failed === 1, JSON.stringify(c));
+  check("a test NAMED failed is not counted as a failure", c.passed === 2 && c.failed === 1, JSON.stringify(c));
+
+  // A build failure produces no Test Case lines at all. Reporting 0/0 there
+  // would render as a green run that tested nothing.
+  const none = countXcodebuildTests("error: no such module 'Supabase'\n** BUILD FAILED **");
+  check("a build failure yields no test counts", none.passed === 0 && none.failed === 0, JSON.stringify(none));
+
+  // XCTSkip is how a suite says "I could not test this". greenfolio's iOS UI
+  // tests skip every case without a signed-in session, and xcodebuild still
+  // exits 0 -- so a suite that tested NOTHING must never look like a pass.
+  const allSkipped = [
+    "Test Case '-[GreenFolioUITests.BloomsUITests testBloomsRowAppears]' started.",
+    "Test Case '-[GreenFolioUITests.BloomsUITests testBloomsRowAppears]' skipped (48.2 seconds).",
+    "Test Case '-[GreenFolioUITests.BloomsUITests testComposerReachesTheEditor]' skipped (41.1 seconds).",
+  ].join("\n");
+  const sk = countXcodebuildTests(allSkipped);
+  check("skipped tests are counted separately", sk.skipped === 2 && sk.passed === 0 && sk.failed === 0,
+    JSON.stringify(sk));
+  check("a started line is not counted as a result", sk.skipped + sk.passed + sk.failed === 2,
+    JSON.stringify(sk));
+
+  // The verdict rule the executor applies to those counts, asserted here
+  // because it is the part that decides whether a nightly is read or ignored.
+  const majoritySkipped = (c: { passed: number; failed: number; skipped: number }) =>
+    c.skipped > 0 && c.skipped >= c.passed + c.failed;
+  // greenfolio-ios today: 7 pass, 9 skip for want of a signed-in session. More
+  // of the suite did not run than did, so this is not a green nightly.
+  check("a majority-skipped suite is not a pass", majoritySkipped({ passed: 7, failed: 0, skipped: 9 }));
+  // The gradual case the all-or-nothing check missed: fixtures rot, one test
+  // survives, and the run would otherwise stay green on that survivor.
+  check("one survivor among skips is not a pass", majoritySkipped({ passed: 1, failed: 0, skipped: 15 }));
+  // A healthy suite with a couple of legitimately-skipped cases still passes.
+  check("a few skips in a healthy suite still pass", !majoritySkipped({ passed: 14, failed: 0, skipped: 2 }));
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

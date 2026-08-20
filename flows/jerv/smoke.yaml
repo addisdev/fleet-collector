@@ -1,0 +1,26 @@
+# Jerv launch: the app opens on the map and offers its activity modes.
+#
+# The map is the app. If MapLibre fails to initialise the screen still renders
+# chrome, so this asserts on the mode selector -- which only exists once the
+# map surface is up -- rather than on a title.
+appId: ${APP_ID}
+---
+- clearState
+- launchApp
+- runFlow:
+    when:
+      visible: "Allow"
+    commands:
+      - tapOn: "Allow"
+# Location is the permission this app cannot work without; on a shelf device
+# nobody is there to tap it, so take the "while using" option when offered.
+- runFlow:
+    when:
+      visible: "While using the app"
+    commands:
+      - tapOn: "While using the app"
+- extendedWaitUntil:
+    visible: "Walk"
+    timeout: 25000
+- assertVisible: "Territory"
+- assertVisible: "Heat"

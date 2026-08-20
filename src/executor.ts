@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { countXcodebuildTests } from "./xcparse.js";
 
 const exec = promisify(execFile);
 
@@ -20,7 +21,12 @@ type Job = {
   job_id: string;
   workload: string;
   app?: { name: string; build: string; sha256: string; platform?: "android" | "ios" };
-  suite?: { kind: string; flows?: string; app_id?: string; asserts?: string[] };
+  suite?: {
+    kind: string; flows?: string; app_id?: string; asserts?: string[];
+    // An app repo running its OWN XCUITest suite rather than the generic
+    // FleetRunner bundle: which project, which scheme, which tests.
+    project?: string; scheme?: string; only?: string;
+  };
   targets?: { pool?: string; exclusive?: boolean; executor?: string; url?: string };
   params?: Record<string, unknown>;
   lease?: { ttl_s?: number };
@@ -213,12 +219,20 @@ function parseJunit(xml: string): { passed: number; failed: number } {
 }
 
 // XCUITest path: iOS simulators only (real devices need signing + devicectl).
-// Pass/fail per device from xcodebuild's exit code; the log tail is uploaded
-// as the artifact since xcresult parsing earns its keep only with real suites.
+// Pass/fail per device from the test counts xcodebuild reports; the log tail is
+// uploaded as the artifact.
 async function runXcuitest(job: Job) {
   const suite = job.suite!;
+  // An app repo's own suite names its project and scheme. The generic
+  // FleetRunner bundle drives an ALREADY-INSTALLED app and so needs an app_id;
+  // a real suite builds and installs the app itself, so it needs neither an
+  // app_id nor the installed-app check below.
+  const ownProject = suite.project ? path.resolve(suite.project) : null;
+  const project = ownProject ?? IOS_PROJECT;
+  const scheme = suite.scheme ?? "FleetRunner";
+  const only = suite.only ?? (ownProject ? undefined : "FleetRunnerUITests");
   const appId = suite.app_id;
-  if (!appId) throw new Error("xcuitest suite needs app_id");
+  if (!appId && !ownProject) throw new Error("xcuitest suite needs app_id or project");
   const asserts = (suite.asserts ?? []).join("|");
   const targets = (await listTargets()).filter((t) => t.platform === "ios");
   if (targets.length === 0) throw new Error("no booted iOS simulators");
@@ -237,7 +251,9 @@ async function runXcuitest(job: Job) {
         });
         continue;
       }
-      if (!(await hasApp(target, appId))) {
+      // Only meaningful for the generic bundle: a project running its own
+      // suite installs the app as part of the test action.
+      if (!ownProject && appId && !(await hasApp(target, appId))) {
         await postResult({
           job_id: job.job_id, device_id: target.id, iter: 0, ok: true,
           error: `skipped: ${appId} not installed`,
@@ -247,36 +263,82 @@ async function runXcuitest(job: Job) {
       }
       let ok = true;
       let logTail = "";
+      let full = "";
       try {
         const { stdout } = await exec(
           "xcodebuild",
-          ["test", "-project", IOS_PROJECT, "-scheme", "FleetRunner",
+          ["test", "-project", project, "-scheme", scheme,
            "-destination", `platform=iOS Simulator,id=${target.id}`,
-           "-only-testing:FleetRunnerUITests"],
+           ...(only ? [`-only-testing:${only}`] : [])],
           {
-            timeout: 900_000,
+            timeout: Number(job.params?.timeout_s ?? 1800) * 1000,
             env: {
               ...process.env,
-              TEST_RUNNER_FLEET_APP_ID: appId,
-              TEST_RUNNER_FLEET_ASSERTS: asserts,
+              ...(appId ? { TEST_RUNNER_FLEET_APP_ID: appId } : {}),
+              ...(asserts ? { TEST_RUNNER_FLEET_ASSERTS: asserts } : {}),
             },
             maxBuffer: 64 * 1024 * 1024,
           },
         );
+        full = stdout;
         logTail = stdout.slice(-4000);
       } catch (e) {
         ok = false;
         allOk = false;
-        logTail = ((e as { stdout?: string }).stdout ?? (e as Error).message).slice(-4000);
+        full = (e as { stdout?: string }).stdout ?? "";
+        logTail = (full || (e as Error).message).slice(-4000);
       }
+      // Counts come from what ran, not from the exit code.
+      const counted = countXcodebuildTests(full);
+      const passed = counted.passed;
+      // A build failure produces no Test Case lines at all, and a suite that
+      // XCTSkip'd every case produces no passes -- xcodebuild exits 0 for the
+      // second, so without this a run that tested NOTHING reports green.
+      let failed = counted.failed || (ok ? 0 : 1);
+      let note = "";
+      // A skip is a test that did not run. Judging only the all-skipped case
+      // makes the check all-or-nothing, while the failure it guards against --
+      // a fixture rotting and coverage quietly shrinking -- is gradual: a suite
+      // that degrades from 16 passing to 1 passing and 15 skipped would stay
+      // green on the strength of the one survivor. Most of the suite not
+      // running is a result nobody should have to read a count to notice.
+      if (counted.skipped > 0 && counted.skipped >= passed + counted.failed) {
+        failed = failed || counted.skipped;
+        note = passed === 0 && counted.failed === 0
+          ? `all ${counted.skipped} tests skipped (no fixture?)`
+          : `${counted.skipped} of ${passed + counted.failed + counted.skipped} tests skipped (no fixture?)`;
+      }
+      if (failed > 0) { ok = false; allOk = false; }
+      // The tail alone is not enough to diagnose a build failure: xcodebuild
+      // prints thousands of lines of compile commands after the error, so the
+      // last 4000 characters are reliably the least useful 4000 characters.
+      // Lead with the diagnostics instead.
+      //
+      // Errors first, and only then warnings. Taking the first N in document
+      // order looks equivalent and is not: an Xcode build routinely emits
+      // hundreds of deprecation warnings, and with 250 of them ahead of it the
+      // one `error:` line falls outside the cap -- reintroducing exactly the
+      // blindness this block exists to remove.
+      const allDiagnostics = full.match(/^.*(?:error|warning):.*$/gm) ?? [];
+      const errors = allDiagnostics.filter((l) => l.includes("error:"));
+      const warnings = allDiagnostics.filter((l) => !l.includes("error:"));
+      const diagnostics = [...errors.slice(0, 100), ...warnings.slice(0, 100)];
       const logFile = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-xc-")), "xcodebuild.log");
-      writeFileSync(logFile, logTail);
+      writeFileSync(
+        logFile,
+        (diagnostics.length ? `--- diagnostics (${diagnostics.length}) ---\n${diagnostics.join("\n")}\n\n` : "") +
+          `--- tail ---\n${logTail}`,
+      );
       const sha = await uploadArtifact(logFile, `${job.job_id}-${target.id}-xcodebuild.log`);
       await postResult({
         job_id: job.job_id, device_id: target.id, iter: 0, ok,
-        test: { passed: ok ? 1 : 0, failed: ok ? 0 : 1, artifacts: [sha] },
+        test: { passed, failed, skipped: counted.skipped, artifacts: [sha] },
+        error: note || undefined,
       });
-      log(`xcuitest on ${target.id}: ${ok ? "passed" : "FAILED"}`);
+      log(
+        `xcuitest ${scheme} on ${target.id}: ${passed} passed / ${failed} failed` +
+        (counted.skipped ? ` / ${counted.skipped} skipped` : "") + (note ? ` -- ${note}` : ""),
+      );
     }
   } finally {
     if (granted) await releaseLocks(job.job_id);
@@ -300,8 +362,21 @@ async function runUiTest(job: Job) {
   // without the app are reported as skipped, not failed (registry pools
   // make this explicit in Phase 4). Same bundle id on both platforms means
   // one flow can span Android and iOS.
+  // The flow names an app; the job may override which VARIANT of it.
+  //
+  // This is the .debug mismatch from the plan. A flow hard-coding
+  // com.taylab.greenfolio.debug cannot test the .smoke build that CI actually
+  // publishes, and a flow hard-coding either cannot test the other -- so the
+  // one flow that existed could never pass against the installed package.
+  // A flow written as `appId: ${APP_ID}` takes the id from the job instead, and
+  // the same flow then covers debug, smoke and release.
   const appIdMatch = /^appId:\s*(\S+)/m.exec(readFileSync(flows, "utf8"));
-  const appId = appIdMatch?.[1];
+  const declared = appIdMatch?.[1];
+  const parameterised = !declared || /\$\{|^\$/.test(declared);
+  if (parameterised && !job.suite?.app_id) {
+    throw new Error(`${flows} takes its appId from the job, so suite.app_id is required`);
+  }
+  const appId = job.suite?.app_id ?? declared;
 
   const granted = job.targets?.exclusive
     ? await acquireLocks(job.job_id, targets.map((t) => t.id))
@@ -333,7 +408,8 @@ async function runUiTest(job: Job) {
     try {
       await exec(
         MAESTRO,
-        ["--device", serial, "test", "--format", "junit", "--output", report, flows],
+        ["--device", serial, "test", "--format", "junit", "--output", report,
+         ...(appId ? ["-e", `APP_ID=${appId}`] : []), flows],
         { timeout: 600_000 },
       );
     } catch {
