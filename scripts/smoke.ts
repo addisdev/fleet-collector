@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
 import { fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial } from "../src/targets.js";
+import { evalMatch } from "../src/match.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
@@ -1382,6 +1383,51 @@ console.log(`smoke against ${BASE}`);
     check("a watch is not an iOS target", !ids.includes("WATCH001"));
         check("exactly the reachable hardware is returned", phys.length === 2, JSON.stringify(ids));
   }
+}
+
+// 34. a job can ask for real hardware and get only real hardware
+{
+  // The two iOS targets the Xcode Mac actually has, described the way the
+  // executor describes them.
+  const SIM = { model: "fleet-iphone-1", os: "ios-27.0", soc: "simulator", kind: "simulator" };
+  const PHONE = { model: "iPhone 12 Pro", os: "ios-18.7.8", soc: "iPhone13,3", kind: "device" };
+
+  // The bug this closes: `match` gated only which EXECUTOR claimed a job. Once
+  // claimed, the executor ran on every target it could see -- so a nightly
+  // meant for an iOS 18 phone also ran on an iOS 27 simulator and reported
+  // both. The same expression must mean the same thing in both places.
+  check("a match for ios-18 selects the phone", evalMatch("os ~ 'ios-18'", PHONE));
+  check("a match for ios-18 rejects the ios-27 simulator", !evalMatch("os ~ 'ios-18'", SIM));
+
+  // device_kind is the blunt instrument for "real hardware, whatever it is",
+  // which no descriptor field states honestly: `kind` describes how a device is
+  // attached, not what it is.
+  const pick = (kind: string, all: { kind: string }[]) => all.filter((d) => d.kind === kind);
+  check("device_kind=device selects only hardware",
+    pick("device", [SIM, PHONE]).length === 1 && pick("device", [SIM, PHONE])[0] === PHONE);
+  check("device_kind=simulator selects only simulators",
+    pick("simulator", [SIM, PHONE]).length === 1 && pick("simulator", [SIM, PHONE])[0] === SIM);
+
+  // A malformed expression must not quietly select everything -- that would
+  // turn a typo into a job that runs on the whole shelf.
+  let threw = false;
+  try { evalMatch("os ~~ ", PHONE); } catch { threw = true; }
+  check("a malformed match expression throws rather than matching all", threw);
+
+  // And the collector must accept the new field so a job can express it.
+  const KIND = `smoke-kind-${run}`;
+  const made = await json("POST", "/jobs", {
+    schema: 1, job_id: KIND, workload: "ui-test", executor: "host",
+    app: { name: "greenfolio-ios", build: "local" },
+    suite: { kind: "xcuitest", project: "/tmp/x.xcodeproj", scheme: "X" },
+    targets: { executor: `never-${run}`, device_kind: "device", match: "os ~ 'ios-18'" },
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a job may ask for real hardware", made.status === 201, `status ${made.status}`);
+  const back = await json("GET", `/api/jobs/${KIND}`);
+  check("device_kind survives the round trip", back.body?.spec?.targets?.device_kind === "device",
+    JSON.stringify(back.body?.spec?.targets));
+  await json("POST", `/api/jobs/${KIND}/cancel`, {});
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

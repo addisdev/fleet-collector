@@ -12,6 +12,7 @@ import {
   fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial,
   type IosDeviceInfo,
 } from "./targets.js";
+import { evalMatch } from "./match.js";
 
 const exec = promisify(execFile);
 
@@ -31,7 +32,11 @@ type Job = {
     // FleetRunner bundle: which project, which scheme, which tests.
     project?: string; scheme?: string; only?: string;
   };
-  targets?: { pool?: string; exclusive?: boolean; executor?: string; url?: string };
+  targets?: {
+    pool?: string; exclusive?: boolean; executor?: string; url?: string;
+    // Honoured HERE as well as at claim time -- see selectTargets.
+    match?: string; device_id?: string; device_kind?: "device" | "simulator";
+  };
   params?: Record<string, unknown>;
   lease?: { ttl_s?: number };
 };
@@ -199,8 +204,8 @@ async function runInstall(job: Job) {
   const app = job.app;
   if (!app) throw new Error("install job needs an app ref");
   const platform = app.platform ?? "android";
-  const targets = (await listTargets()).filter((t) => t.platform === platform);
-  if (targets.length === 0) throw new Error(`no ${platform} targets attached`);
+  const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === platform));
+  if (targets.length === 0) throw new Error(`no ${platform} targets matched this job`);
 
   const dir = mkdtempSync(path.join(os.tmpdir(), "fleet-"));
   let installable: string;
@@ -248,6 +253,61 @@ function parseJunit(xml: string): { passed: number; failed: number } {
   return { passed: tests - failed, failed };
 }
 
+
+/** The simctl device map, or null when there is no Xcode tooling here. */
+async function simctlDevices(): Promise<Record<string, { udid: string; name: string }[]> | null> {
+  try {
+    const { stdout } = await exec("xcrun", ["simctl", "list", "devices", "-j"], { timeout: 20_000 });
+    return (JSON.parse(stdout) as { devices: Record<string, { udid: string; name: string }[]> }).devices;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Narrow the attached targets to the ones this job actually asked for.
+ *
+ * `targets.match` used to gate only which EXECUTOR claimed a job; once claimed,
+ * the executor ran on everything it could see. That was invisible while the
+ * Xcode Mac had a single simulator. It stopped being invisible the moment the
+ * fleet held an iOS 27 simulator and an iOS 18.7 phone at once: a job asking
+ * for `os ~ 'ios-18'` would claim correctly and then run on both, and a nightly
+ * meant for real hardware would quietly report simulator results as well.
+ *
+ * The same expression now means the same thing in both places, evaluated
+ * against the same descriptor the collector holds.
+ *
+ * `device_kind` is the blunt instrument for the common case -- "real hardware,
+ * whatever it is" -- which no descriptor field expresses honestly, because
+ * `kind` is a property of how the device is attached rather than of the device.
+ */
+async function selectTargets(job: Job, all: Target[]): Promise<Target[]> {
+  const t = job.targets ?? {};
+  let out = all;
+
+  if (t.device_id) out = out.filter((x) => x.id === t.device_id);
+  if (t.device_kind) out = out.filter((x) => x.kind === t.device_kind);
+
+  if (t.match) {
+    // Descriptors cost adb, simctl and devicectl calls, so nothing is queried
+    // unless a match expression actually needs one.
+    const sims = await simctlDevices();
+    const ios = out.some((x) => x.platform === "ios") ? await devicectlDevices() : null;
+    const kept: Target[] = [];
+    for (const target of out) {
+      const d = await describeTarget(target, sims, ios);
+      try {
+        if (evalMatch(t.match, d as Record<string, unknown>)) kept.push(target);
+      } catch (e) {
+        // A malformed expression must not silently select everything.
+        throw new Error(`targets.match is invalid: ${(e as Error).message}`);
+      }
+    }
+    out = kept;
+  }
+  return out;
+}
+
 // XCUITest path: booted simulators and physical devices paired with this Mac.
 // A physical device additionally needs a signed test bundle -- xcodebuild will
 // say so plainly, and the diagnostics in the log artifact carry that message.
@@ -266,8 +326,8 @@ async function runXcuitest(job: Job) {
   const appId = suite.app_id;
   if (!appId && !ownProject) throw new Error("xcuitest suite needs app_id or project");
   const asserts = (suite.asserts ?? []).join("|");
-  const targets = (await listTargets()).filter((t) => t.platform === "ios");
-  if (targets.length === 0) throw new Error("no booted iOS simulators");
+  const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === "ios"));
+  if (targets.length === 0) throw new Error("no iOS targets matched this job");
 
   const granted = job.targets?.exclusive
     ? await acquireLocks(job.job_id, targets.map((t) => t.id))
@@ -380,7 +440,7 @@ async function runUiTest(job: Job) {
   const flows = path.resolve(FLOWS_DIR, suite.flows);
   if (!existsSync(flows)) throw new Error(`flows not found: ${flows}`);
 
-  const targets = await listTargets();
+  const targets = await selectTargets(job, await listTargets());
   if (targets.length === 0) throw new Error("no targets attached");
 
   // The appId in the flow decides which pool members can run it; devices
@@ -573,8 +633,8 @@ async function runDrain(job: Job) {
   const gpxSha = job.params?.gpx_sha256 as string | undefined;
   const allowCharging = job.params?.allow_charging === true;
   const platform = job.app?.platform ?? "android";
-  const targets = (await listTargets()).filter((t) => t.platform === platform);
-  if (targets.length === 0) throw new Error(`no ${platform} targets attached`);
+  const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === platform));
+  if (targets.length === 0) throw new Error(`no ${platform} targets matched this job`);
 
   let gpxPath: string | undefined;
   if (gpxSha) {
@@ -659,8 +719,8 @@ async function runSoak(job: Job) {
   const durationS = Number(job.params?.duration_s ?? 3600);
   const intervalS = Number(job.params?.interval_s ?? 60);
   const platform = job.app?.platform ?? "android";
-  const targets = (await listTargets()).filter((t) => t.platform === platform);
-  if (targets.length === 0) throw new Error(`no ${platform} targets attached`);
+  const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === platform));
+  if (targets.length === 0) throw new Error(`no ${platform} targets matched this job`);
 
   const alive = new Map<string, boolean>();
   for (const t of targets) {
@@ -979,15 +1039,7 @@ async function reportAttached() {
       return;
     }
 
-    let sims: Record<string, { udid: string; name: string }[]> | null = null;
-    if (targets.some((t) => t.platform === "ios")) {
-      try {
-        const { stdout } = await exec("xcrun", ["simctl", "list", "devices", "-j"], { timeout: 20_000 });
-        sims = (JSON.parse(stdout) as { devices: Record<string, { udid: string; name: string }[]> }).devices;
-      } catch {
-        sims = null; // no Xcode tooling; describeTarget falls back
-      }
-    }
+    const sims = targets.some((t) => t.platform === "ios") ? await simctlDevices() : null;
 
     // devicectl and simctl can both report the same UDID, so without this the
     // device is registered twice a sweep with a different `kind` each time.
