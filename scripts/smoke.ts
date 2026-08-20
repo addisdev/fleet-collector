@@ -1162,8 +1162,36 @@ console.log(`smoke against ${BASE}`);
   const firedEmpty = (tick2.body?.fired ?? []).some((j: string) => j.startsWith(EMPTY));
   check("a nightly with no build is skipped, not failed", !firedEmpty, JSON.stringify(tick2.body?.fired));
 
+  // A revert republishes bytes that already exist, so the insert is ignored and
+  // the row keeps its ORIGINAL created_at -- which made `latest` resolve to the
+  // build the revert replaced. published_at is what makes this come out right.
+  await put(`older-${run}`, "1.2-revert");
+  const REVERT = `smoke-revert-${run}`;
+  await json("POST", "/jobs", {
+    schema: 1, job_id: REVERT, workload: "install", executor: "host",
+    app: { name: APP, build: "latest", sha256: "latest" },
+    targets: { executor: `never-${run}` }, lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  const reverted = await json("GET", `/api/jobs/${REVERT}`);
+  check("a revert republishing older bytes becomes the latest build",
+    reverted.body?.spec?.app?.build === "1.2-revert", JSON.stringify(reverted.body?.spec?.app?.build));
+
+  // `latest` is the documented contract for hand-written and CI jobs too, not
+  // a scheduler-only convenience.
+  check("POST /jobs resolves latest, never storing the literal string",
+    reverted.body?.spec?.app?.sha256 === older.sha256, JSON.stringify(reverted.body?.spec?.app?.sha256));
+
+  const GHOST = `smoke-ghost-${run}`;
+  const ghost = await json("POST", "/jobs", {
+    schema: 1, job_id: GHOST, workload: "install", executor: "host",
+    app: { name: `never-built-${run}`, build: "latest", sha256: "latest" },
+    targets: { executor: `never-${run}` }, lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a job asking for a build nobody has published is rejected", ghost.status === 400,
+    `status ${ghost.status}`);
+
   for (const id of [SCHED, EMPTY]) await json("DELETE", `/schedules/${id}`, undefined);
-  if (jobId) await json("POST", `/api/jobs/${jobId}/cancel`, {});
+  for (const j of [jobId, REVERT]) if (j) await json("POST", `/api/jobs/${j}/cancel`, {});
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

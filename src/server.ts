@@ -302,10 +302,18 @@ app.get("/executor/next-job", async (req, reply) => {
 // --- jobs ---
 
 app.post("/jobs", async (req, reply) => {
-  const spec = req.body as JobSpec;
+  let spec = req.body as JobSpec;
   if (spec?.schema !== 1) return reply.code(400).send({ error: "schema must be 1" });
   if (!spec.job_id) return reply.code(400).send({ error: "job_id required" });
   if (!WORKLOADS.has(spec.workload)) return reply.code(400).send({ error: `unknown workload: ${spec.workload}` });
+  // `latest` is the documented contract for CI and for hand-written jobs, not
+  // a scheduler-only convenience. Resolving here means a job posted directly
+  // is never pinned to a string that cannot name an artifact.
+  try {
+    spec = resolveLatestBuild(spec);
+  } catch (e) {
+    return reply.code(400).send({ error: String((e as Error).message ?? e) });
+  }
   if (spec.executor !== "device" && spec.executor !== "host")
     return reply.code(400).send({ error: "executor must be 'device' or 'host'" });
 
@@ -634,12 +642,21 @@ function resolveLatestBuild(spec: JobSpec): JobSpec {
   const appName = spec.app?.name;
   if (!appName) throw new Error("app.sha256 is 'latest' but app.name is missing");
   const row = db
-    .prepare("SELECT sha256, build FROM artifacts WHERE app = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+    .prepare(
+      `SELECT sha256, build FROM artifacts WHERE app = ?
+       ORDER BY COALESCE(publish_seq, rowid) DESC LIMIT 1`,
+    )
     .get(appName) as { sha256: string; build: string | null } | undefined;
   if (!row) throw new Error(`no build has been uploaded for ${appName}`);
   // Record the build string the artifact carries, so a result says which build
-  // actually ran rather than the literal word "latest".
-  return { ...spec, app: { ...spec.app, sha256: row.sha256, build: row.build ?? spec.app.build } };
+  // actually ran. Falling back to the template's build would write the literal
+  // word "latest" into the result, which is untraceable to any commit; the
+  // short hash is at least a real answer.
+  const templateBuild = spec.app.build === "latest" ? undefined : spec.app.build;
+  return {
+    ...spec,
+    app: { ...spec.app, sha256: row.sha256, build: row.build ?? templateBuild ?? row.sha256.slice(0, 12) },
+  };
 }
 
 // Fire due schedules for the current minute (at most once per minute each).
@@ -741,12 +758,18 @@ app.post("/artifacts", async (req, reply) => {
   db.prepare(
     "INSERT OR IGNORE INTO artifacts (sha256, name, size, app, build, platform) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(sha256, name, size, app_, build, platform);
-  // Content-addressing means re-uploading an identical build is a no-op, so the
-  // INSERT is ignored -- but a rebuild of the same bytes under a new version
-  // string should still update what we know about it.
+  // Content-addressing means re-uploading identical bytes is an ignored insert,
+  // so a revert that republishes an earlier build would otherwise keep that
+  // build's original created_at and sort BEHIND the build it just replaced.
+  // Stamping published_at is what makes `latest` mean "most recently
+  // published" rather than "first seen".
   if (app_) {
     db.prepare(
-      "UPDATE artifacts SET app = ?, build = COALESCE(?, build), platform = COALESCE(?, platform) WHERE sha256 = ?",
+      `UPDATE artifacts
+          SET app = ?, build = COALESCE(?, build), platform = COALESCE(?, platform),
+              published_at = datetime('now'),
+              publish_seq = (SELECT COALESCE(MAX(publish_seq), 0) + 1 FROM artifacts)
+        WHERE sha256 = ?`,
     ).run(app_, build, platform, sha256);
   }
   announce({ type: "artifact", sha256, name, size, app: app_, build });
