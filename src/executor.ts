@@ -295,6 +295,14 @@ function parseJunit(xml: string): { passed: number; failed: number } {
 }
 
 
+/** Is this target one the fleet may run work on? Presence and jobs must agree. */
+async function fleetOwnedTarget(
+  t: Target,
+  sims: Record<string, { udid: string; name: string }[]> | null,
+): Promise<boolean> {
+  return fleetOwned(await virtualNameOf(t, sims));
+}
+
 /** The simctl device map, or null when there is no Xcode tooling here. */
 async function simctlDevices(): Promise<Record<string, { udid: string; name: string }[]> | null> {
   try {
@@ -325,6 +333,23 @@ async function simctlDevices(): Promise<Record<string, { udid: string; name: str
 async function selectTargets(job: Job, all: Target[]): Promise<Target[]> {
   const t = job.targets ?? {};
   let out = all;
+
+  // Membership first, and this was missing. fleetOwned gated only PRESENCE --
+  // a scratch simulator could not join the device list, but a job still ran on
+  // it, because target selection never asked. Observed: an aliquant suite
+  // pinned to simulators ran on `fleet-sim-1` AND on a stray `iPhone 17`
+  // somebody had booted, and reported both.
+  //
+  // "It cannot be registered" and "it cannot be given work" are different
+  // claims, and only the second one keeps a nightly honest.
+  {
+    const sims = out.some((x) => x.platform === "ios") ? await simctlDevices() : null;
+    const owned: Target[] = [];
+    for (const target of out) {
+      if (await fleetOwnedTarget(target, sims)) owned.push(target);
+    }
+    out = owned;
+  }
 
   if (t.device_id) out = out.filter((x) => x.id === t.device_id);
   if (t.device_kind) out = out.filter((x) => x.kind === t.device_kind);
@@ -1173,7 +1198,7 @@ async function reportAttached() {
     for (const t of targets) {
       if (seen.has(t.id)) continue;
       seen.add(t.id);
-      if (!fleetOwned(await virtualNameOf(t, sims))) continue;
+      if (!(await fleetOwnedTarget(t, sims))) continue;
       try {
         await fetch(`${BASE}/devices/register`, {
           method: "POST",
