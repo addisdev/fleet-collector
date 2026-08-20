@@ -8,7 +8,10 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } fro
 import os from "node:os";
 import path from "node:path";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "./xcparse.js";
-import { fleetOwned } from "./targets.js";
+import {
+  fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial,
+  type IosDeviceInfo,
+} from "./targets.js";
 
 const exec = promisify(execFile);
 
@@ -101,32 +104,56 @@ async function bootedSimulators(): Promise<string[]> {
   }
 }
 
-// Physical iPhones/iPads paired with this Mac, via devicectl (Xcode 15+).
-// Requires the device to be connected (USB or Wi-Fi) and trusted; installs
-// need a build signed for it (TestFlight / dev profile), which is the app
-// repo's problem, not the fleet's.
-async function connectedIosDevices(): Promise<string[]> {
+/**
+ * What devicectl knows, keyed by identifier.
+ *
+ * Read once and shared, because devicectl is slow and every caller wants the
+ * same answer. The important field is `transport`, and it is not the obvious
+ * one: devicectl lists SIMULATORS as devices too, with no `isSimulated` flag
+ * to tell them apart -- this Mac reports 25 "devices", of which one is real.
+ * A simulator is always `sameMachine`; hardware arrives over `wired` or
+ * `localNetwork`. Filtering on tunnelState alone let a simulator through as a
+ * physical device, which is how one ended up in the fleet.
+ */
+async function devicectlDevices(): Promise<IosDeviceInfo[]> {
   try {
     const out = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-dc-")), "devices.json");
     await exec("xcrun", ["devicectl", "list", "devices", "--json-output", out], { timeout: 30_000 });
     const parsed = JSON.parse(readFileSync(out, "utf8")) as {
-      result?: { devices?: { identifier: string; connectionProperties?: { tunnelState?: string } }[] };
+      result?: {
+        devices?: {
+          identifier: string;
+          connectionProperties?: { tunnelState?: string; transportType?: string };
+          hardwareProperties?: { marketingName?: string; productType?: string; platform?: string };
+          deviceProperties?: { name?: string; osVersionNumber?: string };
+        }[];
+      };
     };
-    return (parsed.result?.devices ?? [])
-      .filter((d) => d.connectionProperties?.tunnelState === "connected")
-      .map((d) => d.identifier);
+    return (parsed.result?.devices ?? []).map((d) => ({
+      identifier: d.identifier,
+      name: d.deviceProperties?.name,
+      marketingName: d.hardwareProperties?.marketingName,
+      productType: d.hardwareProperties?.productType,
+      osVersion: d.deviceProperties?.osVersionNumber,
+      transport: d.connectionProperties?.transportType,
+      tunnelState: d.connectionProperties?.tunnelState,
+      platform: d.hardwareProperties?.platform,
+    }));
   } catch {
-    return [];
+    return []; // no Xcode tooling on this host
   }
 }
 
-// Android serials, booted iOS simulator UDIDs, and connected physical iOS
-// devices (devicectl identifiers).
 async function listTargets(): Promise<Target[]> {
   const android = (await adbDevices()).map((id): Target => ({ id, platform: "android", kind: "device" }));
   const sims = (await bootedSimulators()).map((id): Target => ({ id, platform: "ios", kind: "simulator" }));
-  const phones = (await connectedIosDevices()).map((id): Target => ({ id, platform: "ios", kind: "device" }));
-  return [...android, ...sims, ...phones];
+  const phones = physicalIos(await devicectlDevices()).map((d): Target => ({
+    id: d.identifier, platform: "ios", kind: "device",
+  }));
+  // A booted simulator is reported by BOTH simctl and devicectl, so dedupe and
+  // let the simctl answer win: it is the one that knows it is a simulator.
+  const seen = new Set(sims.map((t) => t.id));
+  return [...android, ...sims, ...phones.filter((t) => !seen.has(t.id))];
 }
 
 async function hasApp(target: Target, appId: string): Promise<boolean> {
@@ -219,7 +246,9 @@ function parseJunit(xml: string): { passed: number; failed: number } {
   return { passed: tests - failed, failed };
 }
 
-// XCUITest path: iOS simulators only (real devices need signing + devicectl).
+// XCUITest path: booted simulators and physical devices paired with this Mac.
+// A physical device additionally needs a signed test bundle -- xcodebuild will
+// say so plainly, and the diagnostics in the log artifact carry that message.
 // Pass/fail per device from the test counts xcodebuild reports; the log tail is
 // uploaded as the artifact.
 async function runXcuitest(job: Job) {
@@ -269,7 +298,10 @@ async function runXcuitest(job: Job) {
         const { stdout } = await exec(
           "xcodebuild",
           ["test", "-project", project, "-scheme", scheme,
-           "-destination", `platform=iOS Simulator,id=${target.id}`,
+           // A physical device is not a simulator, and xcodebuild will not
+           // guess: the destination platform has to match the hardware or the
+           // run fails before a single test starts.
+           "-destination", `platform=${target.kind === "simulator" ? "iOS Simulator" : "iOS"},id=${target.id}`,
            ...(only ? [`-only-testing:${only}`] : [])],
           {
             timeout: Number(job.params?.timeout_s ?? 1800) * 1000,
@@ -851,6 +883,21 @@ async function describeTarget(
   } catch {
     // simctl changed its output shape.
   }
+
+  // Physical hardware. `{model: "iphone", os: "ios"}` would register the phone
+  // and leave it untargetable -- `os ~ 'ios-18'` matches nothing without the
+  // version, and every iPhone on the shelf would look identical.
+  const info = (await devicectlDevices()).find((d) => d.identifier === t.id);
+  if (info) {
+    return {
+      model: info.marketingName ?? info.name ?? "iphone",
+      os: info.osVersion ? `ios-${info.osVersion}` : "ios",
+      ...(info.productType ? { soc: info.productType } : {}),
+      serial: t.id,
+      attached_to: NAME,
+      kind: "device",
+    };
+  }
   return { model: t.kind === "simulator" ? "simulator" : "iphone", os: "ios", serial: t.id, attached_to: NAME, kind: t.kind };
 }
 
@@ -866,6 +913,29 @@ async function describeTarget(
  * Best effort by design -- presence must never be the reason an executor stops
  * claiming work, so failures here are swallowed.
  */
+/**
+ * The virtual device name behind this target, or null if it is real hardware.
+ *
+ * Android emulators are resolved over adb because the serial (`emulator-5554`)
+ * says nothing about which AVD it is -- the Xcode Mac was running one called
+ * `jerv-test`, which has no business taking nightly work.
+ */
+async function virtualNameOf(
+  t: Target,
+  sims: Record<string, { udid: string; name: string }[]> | null,
+): Promise<string | null> {
+  if (t.platform === "ios") return simulatorName(t.id, sims);
+  if (!isAndroidEmulatorSerial(t.id)) return null; // a cabled phone
+  try {
+    const { stdout } = await exec(ADB, ["-s", t.id, "emu", "avd", "name"], { timeout: 10_000 });
+    // `adb emu` answers with the value then a trailing OK line.
+    return stdout.split("\n").map((l) => l.trim()).filter((l) => l && l !== "OK")[0] ?? t.id;
+  } catch {
+    // Unreachable emulators cannot be identified, so they do not get in.
+    return t.id;
+  }
+}
+
 let reporting = false;
 
 async function reportAttached() {
@@ -900,7 +970,7 @@ async function reportAttached() {
     for (const t of targets) {
       if (seen.has(t.id)) continue;
       seen.add(t.id);
-      if (!fleetOwned(t.id, sims)) continue;
+      if (!fleetOwned(await virtualNameOf(t, sims))) continue;
       try {
         await fetch(`${BASE}/devices/register`, {
           method: "POST",
