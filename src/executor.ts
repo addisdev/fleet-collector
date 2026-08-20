@@ -10,6 +10,7 @@ import path from "node:path";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "./xcparse.js";
 import {
   fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial, iosNotReadyReason,
+  adbFailureIsWorthReporting,
   type IosDeviceInfo,
 } from "./targets.js";
 import { evalMatch } from "./match.js";
@@ -102,11 +103,30 @@ async function releaseLocks(jobId: string) {
  * tooling being absent; this was the one that did not, and it went unnoticed
  * because every host so far happened to have adb.
  */
+let adbComplaint = "";
+
 async function adbDevices(): Promise<string[]> {
   let stdout: string;
   try {
     ({ stdout } = await exec(ADB, ["devices"]));
-  } catch {
+    adbComplaint = "";
+  } catch (e) {
+    const err = e as { code?: string; stderr?: string; message?: string };
+    // ENOENT is the iOS-only host this function exists for: no adb, no Android
+    // devices, nothing to say. Anything else means adb IS here and is failing
+    // -- a version-mismatched daemon, a dead server -- and returning [] for
+    // that silently empties the whole Android shelf. Every cabled phone reads
+    // offline, and jobs fail with "no android targets matched this job", which
+    // sends you looking at match expressions instead of at adb.
+    if (adbFailureIsWorthReporting(err.code)) {
+      const why = (err.stderr ?? err.message ?? "unknown").trim().split("\n")[0].slice(0, 160);
+      // Once per distinct complaint: this runs every 60s and a permanently
+      // broken adb would otherwise fill the log.
+      if (why !== adbComplaint) {
+        adbComplaint = why;
+        log(`adb is present but failing, so no Android devices are visible: ${why}`);
+      }
+    }
     return [];
   }
   return stdout
@@ -415,6 +435,9 @@ async function runXcuitest(job: Job) {
         log(`xcuitest on ${target.id}: skipped (${appId} not installed)`);
         continue;
       }
+      if (target.kind !== "simulator") {
+        log(`provisioning updates allowed for ${target.id} (may register it with the Apple team)`);
+      }
       let ok = true;
       let logTail = "";
       let full = "";
@@ -429,8 +452,13 @@ async function runXcuitest(job: Job) {
            // A physical device needs a provisioning profile that lists it, and
            // without this xcodebuild refuses rather than fetching one -- "No
            // profiles for 'com.example' were found". Simulators are unsigned,
-           // so it costs them nothing. Xcode still needs a signed-in account
-           // with rights to the team; this only lets it act on one.
+           // so it costs them nothing.
+           //
+           // It authorises xcodebuild to MUTATE the developer portal, not just
+           // read it: an unrecognised device gets registered, consuming one of
+           // the team's 100 slots, which Apple resets only at renewal. That is
+           // a real side effect for a job running unattended at 02:30, so the
+           // log below records which device it was passed for.
            ...(target.kind === "simulator" ? [] : ["-allowProvisioningUpdates"]),
            ...(only ? [`-only-testing:${only}`] : [])],
           {

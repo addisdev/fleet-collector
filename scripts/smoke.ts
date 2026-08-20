@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
 import {
   fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial, iosNotReadyReason,
+  adbFailureIsWorthReporting,
 } from "../src/targets.js";
 import { evalMatch } from "../src/match.js";
 import { redact, keychainPassword } from "../src/secrets.js";
@@ -1294,6 +1295,13 @@ console.log(`smoke against ${BASE}`);
       withFailure.includes(xctestFailure), JSON.stringify(withFailure));
     check("the test failure still outranks the warning", withFailure[0] === xctestFailure,
       withFailure[0]?.slice(0, 60));
+
+    // Tolerating a missing adb must not also tolerate a BROKEN one. A
+    // version-mismatched daemon exits non-zero like any other failure, and
+    // swallowing it empties the whole Android shelf with nothing in the log.
+    check("a missing adb is not worth reporting", !adbFailureIsWorthReporting("ENOENT"));
+    check("a wedged adb is worth reporting", adbFailureIsWorthReporting(undefined));
+    check("a non-zero adb exit is worth reporting", adbFailureIsWorthReporting("1"));
   }
 }
 
