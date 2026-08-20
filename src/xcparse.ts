@@ -31,3 +31,27 @@ export function countXcodebuildTests(out: string): { passed: number; failed: num
   }
   return { passed, failed, skipped };
 }
+
+/**
+ * The error and warning lines out of an xcodebuild log, errors first.
+ *
+ * Two things this gets right that the obvious version does not.
+ *
+ * It matches xcodebuild's actual diagnostic shapes -- a bare `error:` at line
+ * start, or `file:line:col: error:` -- rather than any line containing
+ * "error:". A loose match also catches echoed SOURCE, because
+ * `try? outbox.markFailed(op, error: ...)` is an ordinary Swift argument
+ * label, and those echoes crowd out the real thing.
+ *
+ * And it takes errors BEFORE warnings rather than the first N in document
+ * order. An Xcode build routinely emits hundreds of deprecation warnings, so
+ * with 250 of them ahead of it the single `error:` line falls outside any cap
+ * applied to the document order -- which is exactly the blindness that
+ * capturing diagnostics at all was meant to remove.
+ */
+export function xcodebuildDiagnostics(out: string, cap = 100): string[] {
+  const all = out.match(/^(?:\S.*?:\d+:\d+:\s*)?(?:error|warning):.*$/gm) ?? [];
+  const errors = all.filter((l) => /(?:^|\s)error:/.test(l));
+  const warnings = all.filter((l) => !/(?:^|\s)error:/.test(l));
+  return [...errors.slice(0, cap), ...warnings.slice(0, cap)];
+}
