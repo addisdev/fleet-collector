@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
-import { fleetOwned } from "../src/targets.js";
+import { fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial } from "../src/targets.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
@@ -1328,18 +1328,59 @@ console.log(`smoke against ${BASE}`);
         { udid: "A92E6FCA-7A8C-4255-ADA2-AF835850A259", name: "iPhone 16 Pro" },
       ],
     };
-    check("a fleet simulator joins", fleetOwned("AB0637DA-212F-4E29-AE5F-26EA006BC168", SIMS));
-    // The Xcode Mac is a workstation. A simulator someone booted for five
+    check("a fleet simulator joins", fleetOwned(simulatorName("AB0637DA-212F-4E29-AE5F-26EA006BC168", SIMS)));
+    // The Xcode Mac is a working machine. A simulator someone booted for five
     // minutes of debugging must not quietly start taking nightly work.
-    check("a scratch simulator does not join", !fleetOwned("A92E6FCA-7A8C-4255-ADA2-AF835850A259", SIMS));
-    // devicectl also lists booted simulators as connected devices, so the same
-    // UDID arrives a second time labelled a device. Deciding by that label let
-    // the scratch simulator straight through -- observed on the real host.
-    check("a simulator is still rejected when reported as a device",
-      !fleetOwned("A92E6FCA-7A8C-4255-ADA2-AF835850A259", SIMS));
+    check("a scratch simulator does not join",
+      !fleetOwned(simulatorName("A92E6FCA-7A8C-4255-ADA2-AF835850A259", SIMS)));
     // Real hardware simctl has never heard of is in: somebody cabled it up.
-    check("a cabled phone joins", fleetOwned("988a1b3541354f565a", SIMS));
-    check("a phone joins even with no simctl at all", fleetOwned("988a1b3541354f565a", null));
+    check("a cabled phone joins", fleetOwned(simulatorName("988a1b3541354f565a", SIMS)));
+    check("a phone joins even with no simctl at all", fleetOwned(simulatorName("988a1b3541354f565a", null)));
+
+    // The rule has to cover every kind of virtual device. Gating iOS only is
+    // exactly what let an emulator named `jerv-test` into the fleet.
+    check("an emulator serial is recognised as virtual", isAndroidEmulatorSerial("emulator-5554"));
+    check("a phone serial is not", !isAndroidEmulatorSerial("988a1b3541354f565a"));
+    check("a scratch AVD does not join", !fleetOwned("jerv-test"));
+    check("a fleet AVD joins", fleetOwned("fleet-pixel-8"));
+  }
+
+  // Telling a physical iPhone from a simulator, using devicectl's real output
+  // shape. This matters because devicectl lists simulators AS devices with no
+  // isSimulated flag -- the Xcode Mac reports 25 of them and one real phone.
+  {
+    const DEVICECTL = [
+      // A booted simulator. devicectl calls it a connected iPhone 16.
+      { identifier: "AB0637DA", platform: "iOS", transport: "sameMachine", tunnelState: "connected",
+        pairingState: "paired", marketingName: "iPhone 16", osVersion: "27.0" },
+      // Real hardware on the desk. Note tunnelState -- devicectl reports
+      // `disconnected` for a cabled phone that answers instantly, because the
+      // tunnel is brought up on demand. Gating on it rejected a working phone.
+      { identifier: "09A99EFE", platform: "iOS", transport: "wired", tunnelState: "disconnected",
+        pairingState: "paired", name: "MiPhone 12 Pro", productType: "iPhone13,3", osVersion: "18.7.8" },
+      // Reached over the network and not currently on it: genuinely unreachable.
+      { identifier: "OFFLINE1", platform: "iOS", transport: "localNetwork", tunnelState: "disconnected",
+        pairingState: "paired", marketingName: "iPhone 16 Pro", osVersion: "26.6" },
+      // On the network and answering.
+      { identifier: "NETOK001", platform: "iOS", transport: "localNetwork", tunnelState: "connected",
+        pairingState: "paired", marketingName: "iPad Air", osVersion: "18.4" },
+      // A paired Apple Watch is not a UI-test target.
+      { identifier: "WATCH001", platform: "watchOS", transport: "localNetwork", tunnelState: "connected",
+        pairingState: "paired", marketingName: "Apple Watch Series 11" },
+    ];
+    const phys = physicalIos(DEVICECTL);
+    const ids = phys.map((d) => d.identifier);
+    check("a simulator reported by devicectl is not physical hardware",
+      !ids.includes("AB0637DA"), JSON.stringify(ids));
+    // The one that matters: this exact device, wired and answering, was
+    // rejected by a tunnelState check.
+    check("a wired phone is reachable even when the tunnel reads disconnected",
+      ids.includes("09A99EFE"), JSON.stringify(ids));
+    check("a network device that is off the network is not offered",
+      !ids.includes("OFFLINE1"), "a job would fail on an unreachable device");
+    check("a network device that is on the network is offered", ids.includes("NETOK001"), JSON.stringify(ids));
+    check("a watch is not an iOS target", !ids.includes("WATCH001"));
+        check("exactly the reachable hardware is returned", phys.length === 2, JSON.stringify(ids));
   }
 }
 

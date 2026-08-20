@@ -11,26 +11,84 @@ export const SIM_PREFIX = process.env.FLEET_SIM_PREFIX ?? "fleet-";
 /**
  * Is this something the fleet should be running work on?
  *
- * "Attached" is not the same as "in the fleet". The Mac hosting the iOS
- * executor is a workstation with Xcode, so at any moment it may have scratch
- * simulators booted for something unrelated -- and registering those would let
- * a nightly claim a developer's throwaway device and report the result as
- * fleet hardware.
+ * "Attached" is not the same as "in the fleet". Both hosts are working
+ * machines: the Xcode Mac has scratch simulators booted for unrelated work,
+ * and it had an Android emulator named `jerv-test` running too. Registering
+ * those lets a nightly claim somebody's throwaway device and report the result
+ * as fleet hardware.
  *
- * Membership is decided by asking simctl, never by which enumerator produced
- * the target: devicectl also lists booted simulators as connected devices, so
- * the same UDID arrives twice, once as a simulator and once as a device.
- * Trusting the caller's label let that second copy walk straight past this
- * check -- observed, not theorised.
+ * The rule is the same for every kind of virtual device, which is the point --
+ * an earlier version gated iOS simulators only, and an Android emulator walked
+ * straight in the day after.
+ *
+ *   physical hardware  -> in. Somebody cabled it up deliberately.
+ *   virtual device     -> in only if its NAME opts in.
+ *
+ * Pass `null` for hardware, or the simulator/AVD name for anything virtual.
  */
-export function fleetOwned(
+export function fleetOwned(virtualName: string | null | undefined, prefix = SIM_PREFIX): boolean {
+  if (virtualName === null || virtualName === undefined) return true;
+  return virtualName.toLowerCase().startsWith(prefix.toLowerCase());
+}
+
+/**
+ * The name of the virtual device behind this id, or null if it is real hardware.
+ *
+ * Decided by asking simctl, never by which enumerator produced the target:
+ * devicectl also lists booted simulators as connected devices, so the same
+ * UDID arrives twice, once as a simulator and once as a device. Trusting the
+ * caller's label let that second copy walk past the check.
+ */
+export function simulatorName(
   udid: string,
   sims: Record<string, { udid: string; name: string }[]> | null,
-  prefix = SIM_PREFIX,
-): boolean {
-  const name = Object.values(sims ?? {}).flat().find((d) => d.udid === udid)?.name;
-  // simctl has never heard of it, so it is not a simulator: real hardware is
-  // in by virtue of somebody having cabled it to the shelf.
-  if (name === undefined) return true;
-  return name.toLowerCase().startsWith(prefix.toLowerCase());
+): string | null {
+  return Object.values(sims ?? {}).flat().find((d) => d.udid === udid)?.name ?? null;
+}
+
+/** An adb serial of the form `emulator-5554` is an emulator, not a phone. */
+export function isAndroidEmulatorSerial(serial: string): boolean {
+  return /^emulator-\d+$/.test(serial);
+}
+
+/** What `devicectl list devices` tells us about one entry. */
+export type IosDeviceInfo = {
+  identifier: string;
+  name?: string;
+  marketingName?: string;
+  productType?: string;
+  osVersion?: string;
+  transport?: string;
+  tunnelState?: string;
+  pairingState?: string;
+  platform?: string;
+};
+
+/**
+ * Real, reachable iPhones and iPads -- not simulators, whatever devicectl calls them.
+ *
+ * Two fields, and neither is the obvious one.
+ *
+ * `transport` separates hardware from simulators. devicectl lists SIMULATORS
+ * as devices with no `isSimulated` flag: this Mac reports 26 "devices", of
+ * which two are real. A simulator runs here and is always `sameMachine`.
+ *
+ * `tunnelState` is NOT a reachability test, which is the trap. A wired iPhone
+ * sitting on this desk reports `tunnelState: disconnected` and yet answers
+ * `devicectl device info details` immediately with a tunnel IP -- devicectl
+ * brings the tunnel up on demand. Gating on it rejected a working phone.
+ *
+ * So: cabled hardware is reachable, full stop. A device reached over the local
+ * network is only reachable while it is actually on the network, and there
+ * tunnelState is the best signal available.
+ */
+export function physicalIos(all: IosDeviceInfo[]): IosDeviceInfo[] {
+  return all.filter((d) => {
+    if (d.platform !== "iOS") return false;
+    if (d.transport === undefined || d.transport === "sameMachine") return false;
+    if (d.pairingState !== undefined && d.pairingState !== "paired") return false;
+    // Plugged in is plugged in.
+    if (d.transport === "wired") return true;
+    return d.tunnelState === "connected";
+  });
 }
