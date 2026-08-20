@@ -21,12 +21,14 @@ type Job = {
   workload: string;
   app?: { name: string; build: string; sha256: string; platform?: "android" | "ios" };
   suite?: { kind: string; flows?: string; app_id?: string; asserts?: string[] };
-  targets?: { pool?: string; exclusive?: boolean };
+  targets?: { pool?: string; exclusive?: boolean; executor?: string; url?: string };
   params?: Record<string, unknown>;
 };
 
 // The generic XCUITest bundle lives in the iOS runner repo; one scheme tests
 // any app via TEST_RUNNER_-passed env (FLEET_APP_ID / FLEET_ASSERTS).
+const WEB_SPECS_DIR = process.env.FLEET_WEB_SPECS_DIR ?? path.resolve("web-specs");
+
 const IOS_PROJECT = process.env.FLEET_IOS_PROJECT ??
   path.resolve("../fleet-runner-ios/FleetRunner.xcodeproj");
 
@@ -597,6 +599,80 @@ async function runSoak(job: Job) {
   await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
 }
 
+/**
+ * web-test: Playwright against a URL.
+ *
+ * No device, so no target list and no locks — the "device" on the result row is
+ * the browser, because a result row needs a device_id and pretending a phone
+ * was involved would be worse than naming what actually ran.
+ *
+ * Browsers install into the executor's own home directory, so this stays
+ * sudo-free like everything else on these machines.
+ */
+async function runWebTest(job: Job) {
+  const url = job.targets?.url;
+  if (!url) throw new Error("web-test needs targets.url");
+  const spec = (job.suite?.flows as string | undefined) ?? ".";
+  const browser = (job.params?.browser as string | undefined) ?? "chromium";
+  const specDir = path.resolve(WEB_SPECS_DIR, spec);
+  if (!specDir.startsWith(path.resolve(WEB_SPECS_DIR))) throw new Error("suite.flows escapes the specs dir");
+
+  const deviceId = `web:${browser}`;
+  const out = mkdtempSync(path.join(os.tmpdir(), `web-${job.job_id}-`));
+
+  const args = [
+    "playwright", "test", specDir,
+    `--project=${browser}`,
+    "--reporter=json",
+    `--output=${out}`,
+  ];
+  const started = Date.now();
+  let passed = 0;
+  let failed = 0;
+  let ok = false;
+  let detail = "";
+
+  try {
+    const { stdout } = await exec("npx", args, {
+      timeout: Number(job.params?.timeout_s ?? 900) * 1000,
+      env: { ...process.env, PLAYWRIGHT_BASE_URL: url, CI: "1" },
+    });
+    // Playwright's JSON reporter puts the counts in stats; a non-zero exit is
+    // a failing suite, not a broken run, so both paths report rather than throw.
+    const report = JSON.parse(stdout.slice(stdout.indexOf("{")));
+    passed = report.stats?.expected ?? 0;
+    failed = (report.stats?.unexpected ?? 0) + (report.stats?.flaky ?? 0);
+    ok = failed === 0 && passed > 0;
+  } catch (e: unknown) {
+    const err = e as { stdout?: string; message?: string };
+    try {
+      const report = JSON.parse((err.stdout ?? "").slice((err.stdout ?? "").indexOf("{")));
+      passed = report.stats?.expected ?? 0;
+      failed = (report.stats?.unexpected ?? 0) + (report.stats?.flaky ?? 0);
+      detail = report.errors?.[0]?.message ?? "";
+    } catch {
+      detail = (err.message ?? String(e)).slice(0, 400);
+      failed = failed || 1;
+    }
+  }
+
+  // A trace or screenshot is the whole reason a failing web test is
+  // debuggable later, so upload whatever Playwright left behind.
+  const artifacts: string[] = [];
+  for (const f of (existsSync(out) ? readdirSync(out, { withFileTypes: true }) : [])) {
+    if (!f.isFile()) continue;
+    artifacts.push(await uploadArtifact(path.join(out, f.name), `${job.job_id}-${f.name}`));
+  }
+
+  await postResult({
+    job_id: job.job_id, device_id: deviceId, iter: 0,
+    ok, test: { passed, failed, artifacts },
+    error: ok ? undefined : detail || `${failed} failing`,
+  });
+  log(`web-test ${url} (${browser}): ${passed} passed / ${failed} failed in ${((Date.now() - started) / 1000).toFixed(0)}s`);
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok });
+}
+
 async function main() {
   log(`polling ${BASE} (flows: ${FLOWS_DIR})`);
   while (true) {
@@ -618,6 +694,7 @@ async function main() {
       else if (job.workload === "ui-test") await runUiTest(job);
       else if (job.workload === "soak") await runSoak(job);
       else if (job.workload === "drain") await runDrain(job);
+      else if (job.workload === "web-test") await runWebTest(job);
       else {
         await postResult({
           job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,

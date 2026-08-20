@@ -5,3 +5,7 @@ artifacts/store/
 .DS_Store
 power.json
 dash/dist/
+
+# Playwright's per-run output. Traces and screenshots that matter are uploaded
+# to the artifact store by the executor; what lands here is scratch.
+test-results/

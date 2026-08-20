@@ -73,6 +73,8 @@ type JobSpec = {
     // cannot express it. iOS work needs the Mac with Xcode; Android shelf work
     // needs the machine the shelf is cabled to.
     executor?: string;
+    // web-test only: what to point the browser at.
+    url?: string;
   };
   lease?: { ttl_s?: number; max_attempts?: number };
   // Queue position and provenance. Both are collector bookkeeping rather than
@@ -82,7 +84,9 @@ type JobSpec = {
   [k: string]: unknown;
 };
 
-const WORKLOADS = new Set(["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak"]);
+// web-test is host-executed like ui-test, but its target is a URL rather than
+// a device: no phone is involved and none is locked.
+const WORKLOADS = new Set(["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak", "web-test"]);
 
 function touchDevice(deviceId: string) {
   db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE device_id = ?").run(deviceId);
