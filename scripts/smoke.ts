@@ -4,7 +4,9 @@
 import { createHash } from "node:crypto";
 
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
-import { fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial } from "../src/targets.js";
+import {
+  fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial, iosNotReadyReason,
+} from "../src/targets.js";
 import { evalMatch } from "../src/match.js";
 import { redact, keychainPassword } from "../src/secrets.js";
 
@@ -1383,6 +1385,33 @@ console.log(`smoke against ${BASE}`);
     check("a network device that is on the network is offered", ids.includes("NETOK001"), JSON.stringify(ids));
     check("a watch is not an iOS target", !ids.includes("WATCH001"));
         check("exactly the reachable hardware is returned", phys.length === 2, JSON.stringify(ids));
+
+    // What the executor SAYS about a device it is ignoring. The first version
+    // said "is paired but not reachable -- unlock it, trust this Mac" for
+    // every case, which was actively wrong once the executor moved hosts:
+    // pairing is per-Mac and does not travel with the phone, so it advised
+    // unlocking an already-unlocked phone while the real fix went unmentioned.
+    const unpaired = {
+      identifier: "09A99EFE", platform: "iOS", transport: "wired",
+      tunnelState: "disconnected", pairingState: "unpaired", name: "MiPhone 12 Pro",
+    };
+    const reason = iosNotReadyReason(unpaired) ?? "";
+    check("an unpaired phone is told to pair, not to unlock",
+      reason.includes("not paired") && reason.includes("Trust"), reason);
+    check("the unpaired message does not blame the lock screen",
+      !reason.toLowerCase().includes("unlock it, trust"), reason);
+
+    // Paired but off the network is a different problem with different advice.
+    const offNetwork = { ...unpaired, identifier: "OFFNET", transport: "localNetwork", pairingState: "paired" };
+    const r2 = iosNotReadyReason(offNetwork) ?? "";
+    check("a paired but unreachable phone is described as such",
+      r2.includes("not reachable") && !r2.includes("not paired"), r2);
+
+    // And a device that is fine gets no complaint at all -- otherwise the log
+    // fills with noise about working hardware.
+    check("a healthy wired phone produces no message",
+      iosNotReadyReason({ ...unpaired, pairingState: "paired" }) === null,
+      String(iosNotReadyReason({ ...unpaired, pairingState: "paired" })));
   }
 }
 
