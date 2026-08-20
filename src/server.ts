@@ -287,7 +287,13 @@ app.get("/executor/next-job", async (req, reply) => {
   const spec = await longPollClaim("host", claimant, []);
   if (!spec) return reply.code(204).send();
   db.prepare("UPDATE executors SET last_job = ? WHERE name = ?").run(spec.job_id, claimant);
-  return spec;
+  // Hand back the lease the collector actually granted, not the one the job
+  // asked for. Most jobs set none and get a default the executor cannot see;
+  // a workload that must finish inside its lease (web-test has nothing to
+  // beacon with) can only budget itself if it is told the real number.
+  const granted = db.prepare("SELECT lease_ttl_s FROM jobs WHERE job_id = ?").get(spec.job_id) as
+    { lease_ttl_s?: number } | undefined;
+  return { ...spec, lease: { ...(spec.lease ?? {}), ttl_s: granted?.lease_ttl_s ?? spec.lease?.ttl_s } };
 });
 
 // --- jobs ---

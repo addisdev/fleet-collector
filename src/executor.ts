@@ -23,6 +23,7 @@ type Job = {
   suite?: { kind: string; flows?: string; app_id?: string; asserts?: string[] };
   targets?: { pool?: string; exclusive?: boolean; executor?: string; url?: string };
   params?: Record<string, unknown>;
+  lease?: { ttl_s?: number };
 };
 
 // The generic XCUITest bundle lives in the iOS runner repo; one scheme tests
@@ -614,11 +615,42 @@ async function runWebTest(job: Job) {
   if (!url) throw new Error("web-test needs targets.url");
   const spec = (job.suite?.flows as string | undefined) ?? ".";
   const browser = (job.params?.browser as string | undefined) ?? "chromium";
-  const specDir = path.resolve(WEB_SPECS_DIR, spec);
-  if (!specDir.startsWith(path.resolve(WEB_SPECS_DIR))) throw new Error("suite.flows escapes the specs dir");
+  const specRoot = path.resolve(WEB_SPECS_DIR);
+  const specDir = path.resolve(specRoot, spec);
+  // The separator matters: a bare prefix test lets `../web-specs-evil` through,
+  // because it really does start with `.../web-specs`.
+  if (specDir !== specRoot && !specDir.startsWith(specRoot + path.sep)) {
+    throw new Error("suite.flows escapes the specs dir");
+  }
+
+  // Only executors with browsers installed can honestly run this. The fleet
+  // has them on one machine, so an unpinned web job landing anywhere else must
+  // say "this host has no browsers" rather than fail somewhere inside npx --
+  // or worse, quietly download a browser onto a 2016 laptop mid-nightly.
+  if (process.env.FLEET_WEB !== "1") {
+    await postResult({
+      job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,
+      error: `executor ${NAME} has no browsers; pin web-test with targets.executor`,
+    });
+    log(`refused web-test ${job.job_id}: no browsers on ${NAME}`);
+    return;
+  }
 
   const deviceId = `web:${browser}`;
   const out = mkdtempSync(path.join(os.tmpdir(), `web-${job.job_id}-`));
+
+  // Nothing beacons during a web run, so the lease cannot be renewed: the
+  // process must finish inside it or the sweep requeues a job that is still
+  // running and a second executor runs the same suite concurrently.
+  // next-job reports the lease the collector granted. Stop a little short of
+  // it so a timing-out run reports its own failure rather than being swept
+  // mid-flight and silently re-run by whoever claims it next.
+  const lease = Number(job.lease?.ttl_s);
+  const asked = Number(job.params?.timeout_s);
+  const budgetS = Number.isFinite(asked) && asked > 0
+    ? asked
+    : (Number.isFinite(lease) && lease > 30 ? lease - 30 : 570);
+  const timeoutS = Math.max(30, budgetS);
 
   const args = [
     "playwright", "test", specDir,
@@ -634,7 +666,7 @@ async function runWebTest(job: Job) {
 
   try {
     const { stdout } = await exec("npx", args, {
-      timeout: Number(job.params?.timeout_s ?? 900) * 1000,
+      timeout: timeoutS * 1000,
       env: { ...process.env, PLAYWRIGHT_BASE_URL: url, CI: "1" },
     });
     // Playwright's JSON reporter puts the counts in stats; a non-zero exit is
@@ -658,10 +690,23 @@ async function runWebTest(job: Job) {
 
   // A trace or screenshot is the whole reason a failing web test is
   // debuggable later, so upload whatever Playwright left behind.
+  // Playwright puts trace.zip, the failure screenshot and error-context.md in a
+  // per-test SUBDIRECTORY, not at the top level. A flat readdir here uploads
+  // .last-run.json and silently loses everything that makes a red suite
+  // debuggable, so walk the tree and name each file by its relative path.
   const artifacts: string[] = [];
-  for (const f of (existsSync(out) ? readdirSync(out, { withFileTypes: true }) : [])) {
-    if (!f.isFile()) continue;
-    artifacts.push(await uploadArtifact(path.join(out, f.name), `${job.job_id}-${f.name}`));
+  const walk = (dir: string, rel: string) => {
+    const found: { file: string; name: string }[] = [];
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) found.push(...walk(abs, r));
+      else if (e.isFile()) found.push({ file: abs, name: r });
+    }
+    return found;
+  };
+  for (const f of (existsSync(out) ? walk(out, "") : [])) {
+    artifacts.push(await uploadArtifact(f.file, `${job.job_id}-${f.name.replace(/\//g, "_")}`));
   }
 
   await postResult({

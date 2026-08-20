@@ -52,6 +52,11 @@
          one through FLEET_APP_ID / FLEET_ASSERTS at launch. -->
     <key>FLEET_IOS_PROJECT</key>
     <string>/Users/addisdev/Desktop/Fleet Runner/fleet-runner-ios/FleetRunner.xcodeproj</string>
+    <!-- Playwright's browsers are installed in this user's home (sudo-free,
+         like adb and Maestro). This flag is what lets the executor accept
+         web-test; every other host refuses it rather than fail obscurely. -->
+    <key>FLEET_WEB</key>
+    <string>1</string>
     <key>MAESTRO_BIN</key>
     <string>/Users/addisdev/.maestro/bin/maestro</string>
     <key>MAESTRO_CLI_NO_ANALYTICS</key>
