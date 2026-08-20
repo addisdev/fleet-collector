@@ -78,6 +78,11 @@ type JobSpec = {
     executor?: string;
     // web-test only: what to point the browser at.
     url?: string;
+    // Honoured by the host executor when it picks devices to run on, not only
+    // when deciding who claims the job. `device_kind` says "real hardware" or
+    // "simulator" -- which no descriptor field expresses honestly, because it
+    // is a property of how a device is attached rather than of the device.
+    device_kind?: "device" | "simulator";
   };
   lease?: { ttl_s?: number; max_attempts?: number };
   // Queue position and provenance. Both are collector bookkeeping rather than
