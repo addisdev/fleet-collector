@@ -103,18 +103,98 @@ uncertainty first.
 | **U4 — web-test workload** | New workload, Playwright runner, `targets.url`, trace/screenshot artifacts | aliquant-web suite runs from the queue and uploads a trace |
 | **U5 — nightly + CI** | Per-app schedules; `ci-enqueue` wired in each app repo; commit statuses armed | A push produces a build the nightly then tests, and a red suite is visible without opening the dashboard |
 
-## 3.1 Status, 2026-08-19
+> **Next:** [`ios-nightly-suites.md`](ios-nightly-suites.md) covers filling
+> these rails for all three iOS apps. Two of the three have no UI test target
+> and no accessibility identifiers at all, which is the real cost.
 
-**Built and running: U0, U1, U4, U5.**
+## 3.1 Status, 2026-08-20
+
+**Built and running: U0, U1, U3 (greenfolio), U4, U5.**
 
 | Phase | State |
 |---|---|
 | U0 — route jobs to an executor | done, merged |
-| U1 — the iOS executor | done, `mac-xcode` under launchd, XCUITest green on a simulator |
-| U2 — Android suites | **blocked on builds, not on writing flows** — see below |
-| U3 — iOS suites | not started — see below |
+| U1 — the iOS executor | done, moved to RL6P9G7WYT — see §3.2 |
+| U2 — Android suites | apps now installed and smoke-tested; real journeys still to write |
+| U3 — iOS suites | **greenfolio green on a physical iPhone**, signing in |
 | U4 — web-test workload | done, `aliquant-web` green against the live deployment |
 | U5 — nightly + CI | done; two nightlies enabled and proven to fire |
+
+Where U3 actually got to, on an iPhone 12 Pro through the queue:
+
+```
+GreenFolioUITests          10 passed · 1 failed · 1 skipped
+BloomsUITests (after fix)   6 passed · 0 failed · 0 skipped
+```
+
+The single failure was not an app defect, and that is worth recording because
+the test said otherwise in its own failure message. `switch.tap()` does not
+reliably flip a SwiftUI `Toggle` inside a `Form` on a device — XCUITest aims at
+the centre of the row's frame, which is the label rather than the control — so
+the tap missed, the setting never changed, and the test blamed the app for not
+reacting. It had passed on a simulator for a year. **The first run on real
+hardware found a year-old latent bug in the test that exists to find bugs.**
+
+### 3.2 The iOS executor moved
+
+`mac-xcode` now runs on **RL6P9G7WYT** (`runner-host`), not the primary
+workstation, with the iPhone cabled there. Standing it up is written down in
+[`ios-executor-host.md`](ios-executor-host.md); three things from that are
+worth repeating here because each cost real time:
+
+- **The local-network gate applies per host.** A LaunchAgent there cannot reach
+  a LAN address even though a shell on the same machine can, so it runs the
+  same SSH tunnel to fleet-host. Verified with a probe agent rather than
+  assumed.
+- **Pairing is per-Mac and does not travel with the phone.** Developer Mode,
+  the registered UDID and Auto-Lock all live on the device and carried over;
+  the pairing did not.
+- **Never run two executors under one `FLEET_EXECUTOR_NAME`.** Both claim the
+  same pinned jobs and each runs them on whatever it can see.
+
+### 3.3 What moving hosts exposed
+
+Five defects, none of which any amount of reading had found, all fixed:
+
+1. `adbDevices` threw on a Mac with no Android SDK, and the presence sweep
+   swallowed it — so an iOS-only host registered **nothing**, silently,
+   including the iPhone cabled to it.
+2. `-allowProvisioningUpdates` was never passed, so the fleet could not build
+   for a physical device at all. Supplying it by hand during earlier testing
+   had hidden that completely.
+3. The diagnostics regex required `line:column`; XCTest failures carry only a
+   line, so the artifact preserved a hundred deprecation warnings and dropped
+   the failing test.
+4. `targets.match` gated only which executor *claimed* a job — once claimed the
+   executor ran on everything it could see. Harmless with one simulator;
+   wrong the moment the fleet held an iOS 27 simulator and an iOS 18.7 phone.
+5. Scratch simulators and a stray Android emulator (`jerv-test`) auto-joined
+   the fleet and became claimable.
+
+The pattern is worth naming: **every one of these was found by running the
+thing, and none by reading it.** The artifact-diagnostics block alone has now
+had four separate defects.
+
+### 3.4 Sign-in
+
+Suites that need an account skip every test that touches one — greenfolio's
+skipped 8 of 12 — so credentials are the difference between testing the app and
+testing that the app launches.
+
+The rule follows greenfolio's own `ci/set-test-credentials.sh`: never an
+argument, never on disk, never echoed. So **names travel and secrets do not**.
+A job names the *account*; the password lives in the executor host's login
+Keychain, is resolved there, and is scrubbed from logs before they become
+artifacts. `POST /jobs` refuses any spec containing `password`/`secret`/
+`token`/`api_key`, because a spec is stored, served by the API and rendered on
+the dashboard.
+
+Verified from a LaunchAgent on the runner host, which was the open question:
+
+```
+signing in as showcase@greenfol.io (password from the mac-xcode Keychain)
+t = 5.30s  Type '<redacted>' into "Password" SecureTextField
+```
 
 ### What U5 changed about §1.3
 
