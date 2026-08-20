@@ -311,6 +311,22 @@ app.post("/jobs", async (req, reply) => {
   if (spec?.schema !== 1) return reply.code(400).send({ error: "schema must be 1" });
   if (!spec.job_id) return reply.code(400).send({ error: "job_id required" });
   if (!WORKLOADS.has(spec.workload)) return reply.code(400).send({ error: `unknown workload: ${spec.workload}` });
+  // A job spec is stored in SQLite, served by the API and rendered on the
+  // dashboard, so anything in one is effectively published to everyone on the
+  // LAN. Refuse secrets outright rather than trusting every future caller to
+  // remember: the executor resolves passwords from its own host Keychain, and
+  // a spec only ever names the account.
+  {
+    const flat = JSON.stringify(spec).toLowerCase();
+    for (const banned of ["\"password\"", "\"passwd\"", "\"secret\"", "\"token\"", "\"api_key\"", "\"apikey\""]) {
+      if (flat.includes(banned)) {
+        return reply.code(400).send({
+          error: `job specs must not carry secrets (${banned.replace(/"/g, "")}); ` +
+            "name the account instead and keep the password in the executor host's Keychain",
+        });
+      }
+    }
+  }
   // `latest` is the documented contract for CI and for hand-written jobs, not
   // a scheduler-only convenience. Resolving here means a job posted directly
   // is never pinned to a string that cannot name an artifact.

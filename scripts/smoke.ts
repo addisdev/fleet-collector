@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "../src/xcparse.js";
 import { fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial } from "../src/targets.js";
 import { evalMatch } from "../src/match.js";
+import { redact, keychainPassword } from "../src/secrets.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
 let failures = 0;
@@ -1428,6 +1429,69 @@ console.log(`smoke against ${BASE}`);
   check("device_kind survives the round trip", back.body?.spec?.targets?.device_kind === "device",
     JSON.stringify(back.body?.spec?.targets));
   await json("POST", `/api/jobs/${KIND}/cancel`, {});
+}
+
+// 35. UI-test sign-in: names travel, secrets do not
+{
+  // A job spec is stored, served by the API and rendered on the dashboard, so
+  // a password in one is published to everyone on the LAN. The account is not
+  // a secret and is genuinely useful to see; the password never leaves the
+  // executor host's Keychain.
+  const OK = `smoke-cred-${run}`;
+  const good = await json("POST", "/jobs", {
+    schema: 1, job_id: OK, workload: "ui-test", executor: "host",
+    app: { name: "greenfolio-ios", build: "local" },
+    suite: {
+      kind: "xcuitest", project: "/tmp/x.xcodeproj", scheme: "X",
+      credentials: {
+        account: "showcase@greenfol.io",
+        email_var: "GREENFOLIO_TEST_EMAIL",
+        password_var: "GREENFOLIO_TEST_PASSWORD",
+      },
+    },
+    targets: { executor: `never-${run}`, device_kind: "device" },
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a job may name the account it signs in as", good.status === 201, `status ${good.status}`);
+  const back = await json("GET", `/api/jobs/${OK}`);
+  check("the account survives the round trip",
+    back.body?.spec?.suite?.credentials?.account === "showcase@greenfol.io",
+    JSON.stringify(back.body?.spec?.suite?.credentials));
+  await json("POST", `/api/jobs/${OK}/cancel`, {});
+
+  // The guard that matters. Refused outright rather than trusting every future
+  // caller to remember where secrets belong.
+  for (const bad of [
+    { suite: { kind: "xcuitest", password: "hunter2" } },
+    { params: { api_key: "sk-live-xyz" } },
+    { report_to: { token: "ghp_abc" } },
+  ]) {
+    const res = await json("POST", "/jobs", {
+      schema: 1, job_id: `smoke-secret-${run}-${Math.random().toString(36).slice(2, 8)}`,
+      workload: "ui-test", executor: "host",
+      app: { name: "x", build: "1" }, targets: { executor: `never-${run}` }, ...bad,
+    });
+    check(`a spec carrying ${Object.keys(bad)[0]} secrets is refused`, res.status === 400,
+      `status ${res.status} for ${JSON.stringify(bad)}`);
+  }
+
+  // And whatever the suite prints, the password must not reach the artifact
+  // store -- xcodebuild echoes its environment in places, and the log is
+  // downloadable from the dashboard.
+  const log = "env: TEST_RUNNER_GREENFOLIO_TEST_PASSWORD=s3cr3t-value\nTest Case passed";
+  const scrubbed = redact(log, ["s3cr3t-value"]);
+  check("a password is scrubbed from the uploaded log", !scrubbed.includes("s3cr3t-value"), scrubbed);
+  check("scrubbing leaves the rest of the log intact", scrubbed.includes("Test Case passed"));
+  // A short string would match half the log; better to leave it than to redact
+  // everything into uselessness.
+  check("a too-short secret is not used as a scrub pattern", redact("a b c", ["b"]) === "a b c");
+
+  // A missing item and an unreadable one need opposite remedies -- add the
+  // entry, versus unlock the keychain. Telling someone to add an item that
+  // already exists is the kind of advice that costs an hour.
+  const absent = await keychainPassword(`nobody-${run}@example.invalid`, `fleet-absent-${run}`);
+  check("a missing keychain item reports as missing",
+    absent.ok === false && absent.reason === "missing", JSON.stringify(absent));
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
