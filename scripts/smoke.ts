@@ -1058,5 +1058,47 @@ console.log(`smoke against ${BASE}`);
   check("legacy bench links back to the legacy dash", bench.includes('href="/dash/legacy"'));
 }
 
+// 30. the web-test workload: a URL target, no device
+{
+  const WEB = `smoke-web-${run}`;
+  const made = await json("POST", "/jobs", {
+    schema: 1, job_id: WEB, workload: "web-test", executor: "host",
+    app: { name: "aliquant-web", build: "smoke" },
+    suite: { kind: "playwright", flows: "aliquant" },
+    params: { browser: "chromium" },
+    // No `targets.match`: a browser is not a device, so there is nothing to
+    // match against. The URL is the target.
+    targets: { executor: `web-${run}`, url: "http://127.0.0.1:4173" },
+    lease: { ttl_s: 900, max_attempts: 1 },
+  });
+  check("a web-test job is accepted", made.status === 201, `status ${made.status} ${JSON.stringify(made.body)}`);
+
+  const claimed = await json("GET", `/executor/next-job?name=web-${run}`);
+  check("a host executor claims the web-test job", claimed.body?.job_id === WEB, JSON.stringify(claimed.body?.job_id));
+  check("the URL reaches the executor", claimed.body?.targets?.url === "http://127.0.0.1:4173", JSON.stringify(claimed.body?.targets));
+
+  // The two-row shape the dashboard matrix reads: a per-browser verdict that
+  // carries the test outcome, and a `final` host summary that closes the job.
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: WEB, device_id: "web:chromium", ok: true,
+    test: { passed: 1, failed: 0 },
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: WEB, device_id: `host:web-${run}`, ok: true, final: true,
+  });
+
+  const done = await json("GET", `/api/jobs/${WEB}`);
+  check("a web-test job completes", done.body?.status === "done", JSON.stringify(done.body?.status));
+  const browser = (done.body?.results ?? []).find((r: any) => r.device_id === "web:chromium");
+  check("the browser verdict is stored under a web: device id", !!browser, "no web:chromium row");
+  check("the browser verdict carries the counts", browser?.payload?.test?.passed === 1 && browser?.payload?.test?.failed === 0, JSON.stringify(browser?.payload?.test));
+
+  // A browser is not a device and must never be enrolled as one — otherwise
+  // every nightly would add a permanently-offline "device" to the fleet.
+  const devs = await json("GET", "/api/devices?limit=500");
+  const ghost = (devs.body?.devices ?? []).some((d: any) => String(d.device_id).startsWith("web:"));
+  check("a browser is not enrolled as a device", !ghost, "a web: pseudo-device leaked into the device list");
+}
+
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

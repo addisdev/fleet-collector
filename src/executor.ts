@@ -21,12 +21,15 @@ type Job = {
   workload: string;
   app?: { name: string; build: string; sha256: string; platform?: "android" | "ios" };
   suite?: { kind: string; flows?: string; app_id?: string; asserts?: string[] };
-  targets?: { pool?: string; exclusive?: boolean };
+  targets?: { pool?: string; exclusive?: boolean; executor?: string; url?: string };
   params?: Record<string, unknown>;
+  lease?: { ttl_s?: number };
 };
 
 // The generic XCUITest bundle lives in the iOS runner repo; one scheme tests
 // any app via TEST_RUNNER_-passed env (FLEET_APP_ID / FLEET_ASSERTS).
+const WEB_SPECS_DIR = process.env.FLEET_WEB_SPECS_DIR ?? path.resolve("web-specs");
+
 const IOS_PROJECT = process.env.FLEET_IOS_PROJECT ??
   path.resolve("../fleet-runner-ios/FleetRunner.xcodeproj");
 
@@ -597,6 +600,124 @@ async function runSoak(job: Job) {
   await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
 }
 
+/**
+ * web-test: Playwright against a URL.
+ *
+ * No device, so no target list and no locks — the "device" on the result row is
+ * the browser, because a result row needs a device_id and pretending a phone
+ * was involved would be worse than naming what actually ran.
+ *
+ * Browsers install into the executor's own home directory, so this stays
+ * sudo-free like everything else on these machines.
+ */
+async function runWebTest(job: Job) {
+  const url = job.targets?.url;
+  if (!url) throw new Error("web-test needs targets.url");
+  const spec = (job.suite?.flows as string | undefined) ?? ".";
+  const browser = (job.params?.browser as string | undefined) ?? "chromium";
+  const specRoot = path.resolve(WEB_SPECS_DIR);
+  const specDir = path.resolve(specRoot, spec);
+  // The separator matters: a bare prefix test lets `../web-specs-evil` through,
+  // because it really does start with `.../web-specs`.
+  if (specDir !== specRoot && !specDir.startsWith(specRoot + path.sep)) {
+    throw new Error("suite.flows escapes the specs dir");
+  }
+
+  // Only executors with browsers installed can honestly run this. The fleet
+  // has them on one machine, so an unpinned web job landing anywhere else must
+  // say "this host has no browsers" rather than fail somewhere inside npx --
+  // or worse, quietly download a browser onto a 2016 laptop mid-nightly.
+  if (process.env.FLEET_WEB !== "1") {
+    await postResult({
+      job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,
+      error: `executor ${NAME} has no browsers; pin web-test with targets.executor`,
+    });
+    log(`refused web-test ${job.job_id}: no browsers on ${NAME}`);
+    return;
+  }
+
+  const deviceId = `web:${browser}`;
+  const out = mkdtempSync(path.join(os.tmpdir(), `web-${job.job_id}-`));
+
+  // Nothing beacons during a web run, so the lease cannot be renewed: the
+  // process must finish inside it or the sweep requeues a job that is still
+  // running and a second executor runs the same suite concurrently.
+  // next-job reports the lease the collector granted. Stop a little short of
+  // it so a timing-out run reports its own failure rather than being swept
+  // mid-flight and silently re-run by whoever claims it next.
+  const lease = Number(job.lease?.ttl_s);
+  const asked = Number(job.params?.timeout_s);
+  const budgetS = Number.isFinite(asked) && asked > 0
+    ? asked
+    : (Number.isFinite(lease) && lease > 30 ? lease - 30 : 570);
+  const timeoutS = Math.max(30, budgetS);
+
+  const args = [
+    "playwright", "test", specDir,
+    `--project=${browser}`,
+    "--reporter=json",
+    `--output=${out}`,
+  ];
+  const started = Date.now();
+  let passed = 0;
+  let failed = 0;
+  let ok = false;
+  let detail = "";
+
+  try {
+    const { stdout } = await exec("npx", args, {
+      timeout: timeoutS * 1000,
+      env: { ...process.env, PLAYWRIGHT_BASE_URL: url, CI: "1" },
+    });
+    // Playwright's JSON reporter puts the counts in stats; a non-zero exit is
+    // a failing suite, not a broken run, so both paths report rather than throw.
+    const report = JSON.parse(stdout.slice(stdout.indexOf("{")));
+    passed = report.stats?.expected ?? 0;
+    failed = (report.stats?.unexpected ?? 0) + (report.stats?.flaky ?? 0);
+    ok = failed === 0 && passed > 0;
+  } catch (e: unknown) {
+    const err = e as { stdout?: string; message?: string };
+    try {
+      const report = JSON.parse((err.stdout ?? "").slice((err.stdout ?? "").indexOf("{")));
+      passed = report.stats?.expected ?? 0;
+      failed = (report.stats?.unexpected ?? 0) + (report.stats?.flaky ?? 0);
+      detail = report.errors?.[0]?.message ?? "";
+    } catch {
+      detail = (err.message ?? String(e)).slice(0, 400);
+      failed = failed || 1;
+    }
+  }
+
+  // A trace or screenshot is the whole reason a failing web test is
+  // debuggable later, so upload whatever Playwright left behind.
+  // Playwright puts trace.zip, the failure screenshot and error-context.md in a
+  // per-test SUBDIRECTORY, not at the top level. A flat readdir here uploads
+  // .last-run.json and silently loses everything that makes a red suite
+  // debuggable, so walk the tree and name each file by its relative path.
+  const artifacts: string[] = [];
+  const walk = (dir: string, rel: string) => {
+    const found: { file: string; name: string }[] = [];
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) found.push(...walk(abs, r));
+      else if (e.isFile()) found.push({ file: abs, name: r });
+    }
+    return found;
+  };
+  for (const f of (existsSync(out) ? walk(out, "") : [])) {
+    artifacts.push(await uploadArtifact(f.file, `${job.job_id}-${f.name.replace(/\//g, "_")}`));
+  }
+
+  await postResult({
+    job_id: job.job_id, device_id: deviceId, iter: 0,
+    ok, test: { passed, failed, artifacts },
+    error: ok ? undefined : detail || `${failed} failing`,
+  });
+  log(`web-test ${url} (${browser}): ${passed} passed / ${failed} failed in ${((Date.now() - started) / 1000).toFixed(0)}s`);
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok });
+}
+
 async function main() {
   log(`polling ${BASE} (flows: ${FLOWS_DIR})`);
   while (true) {
@@ -618,6 +739,7 @@ async function main() {
       else if (job.workload === "ui-test") await runUiTest(job);
       else if (job.workload === "soak") await runSoak(job);
       else if (job.workload === "drain") await runDrain(job);
+      else if (job.workload === "web-test") await runWebTest(job);
       else {
         await postResult({
           job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,
