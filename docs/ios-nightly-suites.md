@@ -86,9 +86,9 @@ signal arrives first.
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **N0 — identifiers for Jerv** | Identifiers on the map, mode selector, control bar, Settings. Follow greenfolio's rules: on the *control*, never the container | An accessibility dump shows each addressable exactly once |
-| **N1 — Jerv UI target + launch flow** | `JervUITests` target, `DEVELOPMENT_TEAM` set, launch flow green on the iPhone | Runs from the queue on hardware |
-| **N2 — Jerv core loop** | Simulate on, record, stop, assert a saved track | A ride is proven without anyone moving |
+| **N0 — identifiers for Jerv** | ✅ **done.** 16 identifiers, on the control never the container | Dump shows each exactly once — it does |
+| **N1 — Jerv UI target + launch flow** | ✅ **done.** `JervUITests`, launch flow green on the iPhone | Runs from the queue on hardware — it does |
+| **N2 — Jerv core loop** | ✅ **done.** Simulate on, record, assert saved, stop | A ride proven without anyone moving — 133.8s |
 | **N3 — identifiers + target for Aliquant** | Same, plus a decision on seeded balances | Intro and signed-out flows green |
 | **N4 — GreenFolio breadth** | Offline flow, care variant, first regression flows | Each new flow runs nightly |
 | **N5 — three nightlies** | One schedule per app, pinned to hardware | Three green runs, and a red one is visible without opening the dashboard |
@@ -96,6 +96,29 @@ signal arrives first.
 N0 before N1 deliberately. Writing a test against a screen with no identifiers
 means writing it against labels, and label-matched tests break on copy changes
 that are not defects — which is how a suite stops being trusted.
+
+**But N0 cannot be verified without N1, and that was an error in this plan.**
+Its done-criterion is a dump showing each identifier exactly once, and nothing
+produces that dump without a UI test target. Doing N0 meant building the target
+anyway. The lesson generalises to N3: budget the Aliquant target as part of the
+identifier work, not after it.
+
+### What N0–N2 actually cost, for estimating N3
+
+Jerv went from zero identifiers to a recorded ride in one sitting, which is
+faster than this plan implied. Three reasons, all worth knowing before
+Aliquant:
+
+- **`DEVELOPMENT_TEAM` was already at base level** in Jerv's `project.yml`, so
+  the new target inherited it. The signing gap that blocked GreenFolio on
+  device did not exist. Check Aliquant's before assuming.
+- **The audit test paid for itself immediately.** It caught nothing on the
+  first run, which is the point: the counts are what let the identifier work be
+  called done rather than believed done.
+- **The container rule bit once during the work itself.** `metric()` returns a
+  `VStack` of two `Text`s, so an identifier on its result published on the
+  number and its caption both. Caught by writing the rule down first and then
+  noticing the code broke it.
 
 ## 4. What the fleet still needs
 
