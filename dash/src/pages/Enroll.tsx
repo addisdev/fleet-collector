@@ -1,7 +1,7 @@
 // "Add a device" — the screen that turns a phone on the shelf into a runner.
 //
-// The software side of enrolling is easy. The friction is typing
-// http://192.168.50.27:8788 on a touch keyboard, correctly, once per device,
+// The software side of enrolling is easy. The friction is typing the
+// collector's address on a touch keyboard, correctly, once per device,
 // and then not knowing whether it worked. So: a QR code, a download, and a
 // panel that watches the registry and tells you the moment the device appears.
 import { useEffect, useState } from "preact/hooks";

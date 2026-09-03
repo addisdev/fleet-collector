@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "description": "Fleet Runner collector: device registry, job queue, artifact store, results DB, dashboard.",
   "scripts": {
     "start": "tsx src/server.ts",

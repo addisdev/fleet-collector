@@ -1,8 +1,7 @@
 // GET /api/enroll — everything the "add a device" screen needs.
 //
-// The hard part of enrolling a phone is not the software, it is typing
-// `http://192.168.50.27:8788` on a touch keyboard without a typo, once per
-// device. So the screen shows a QR code, and this endpoint supplies the
+// The hard part of enrolling a phone is not the software, it is typing the
+// collector's address on a touch keyboard without a typo, once per device. So the screen shows a QR code, and this endpoint supplies the
 // addresses that are actually worth encoding.
 import type { FastifyInstance } from "fastify";
 import { networkInterfaces } from "node:os";

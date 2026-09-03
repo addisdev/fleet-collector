@@ -18,6 +18,23 @@ artifacts; the summary lands in the results table.
   accuracy pattern is right-species-dominant, not chance).
 - **Preprocessing on-device:** ImageNet mean/std normalization; layout per model.
 
+## Licensing of the models and data
+
+The tracked files here are the manifest, the conversion and quantization
+scripts, and this writeup. No model weights and no images are in this repo;
+each is fetched from its own source and cached as a content-addressed artifact.
+
+| Asset | Source | License |
+|---|---|---|
+| PlantNet-300K ResNet18 (LiteRT) | `litert-community/PlantNet-300K-ResNet18-LiteRT` | Apache-2.0 |
+| House-Plants classifier | `AlyModrik41/House-Plants-Classification-TFLite-Model` | per its model card |
+| PlantNet-300K images | `mikehemberger/plantnet300K` (HF) | CC-BY-SA 4.0 — attribution required, share-alike |
+
+The int8 and Core ML variants are our own conversions of the Apache-2.0
+ResNet18 and inherit its terms. The eval-set images are redistributed to
+devices inside the fleet only, as an artifact; CC-BY-SA is the reason they
+are not committed here.
+
 ## Candidates
 
 | Model | Source | Classes | Size | Input |

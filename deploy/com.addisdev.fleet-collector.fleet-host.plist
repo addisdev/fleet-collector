@@ -5,21 +5,21 @@
   <key>Label</key>
   <string>com.addisdev.fleet-collector</string>
 
-  <!-- The fleet-host variant: a 2016 MacBook Pro (Monterey, Intel) that does
-       nothing but host the collector. Node lives in ~/.local rather than
+  <!-- The fleet-host variant: a spare 2016 MacBook Pro (Monterey, Intel) that
+       does nothing but host the collector. Node lives in ~/.local rather than
        /opt/homebrew because this machine has no Homebrew and no Xcode command
        line tools — the collector needs neither (better-sqlite3 installs from
        a prebuild), and keeping it sudo-free means the whole stack can be
        rebuilt over SSH without anyone at the keyboard. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/elsie/.local/node/bin/node</string>
-    <string>/Users/elsie/fleet-collector/node_modules/tsx/dist/cli.mjs</string>
+    <string>__NODE__</string>
+    <string>__FLEET_HOME__/node_modules/tsx/dist/cli.mjs</string>
     <string>src/server.ts</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/elsie/fleet-collector</string>
+  <string>__FLEET_HOME__</string>
 
   <!-- The devices long-poll this service; a crash that goes unnoticed strands
        every runner. KeepAlive revives it however it died. Stop it deliberately
@@ -40,11 +40,11 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/elsie/.local/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__NODE_BIN_DIR__:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>FLEET_DATA_DIR</key>
-    <string>/Users/elsie/fleet-collector/data</string>
+    <string>__FLEET_HOME__/data</string>
     <key>FLEET_ARTIFACT_DIR</key>
-    <string>/Users/elsie/fleet-collector/artifacts/store</string>
+    <string>__FLEET_HOME__/artifacts/store</string>
     <key>FLEET_PORT</key>
     <string>8788</string>
 
@@ -62,8 +62,8 @@
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/elsie/Library/Logs/fleet-collector.log</string>
+  <string>__HOME__/Library/Logs/fleet-collector.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/elsie/Library/Logs/fleet-collector.log</string>
+  <string>__HOME__/Library/Logs/fleet-collector.log</string>
 </dict>
 </plist>

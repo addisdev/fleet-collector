@@ -21,13 +21,13 @@
        not have. iOS UI tests run from a Mac that does. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/elsie/.local/node/bin/node</string>
-    <string>/Users/elsie/fleet-collector/node_modules/tsx/dist/cli.mjs</string>
+    <string>__NODE__</string>
+    <string>__FLEET_HOME__/node_modules/tsx/dist/cli.mjs</string>
     <string>src/executor.ts</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/elsie/fleet-collector</string>
+  <string>__FLEET_HOME__</string>
 
   <!-- The executor long-polls the collector; if it dies, host jobs simply stop
        being claimed and the queue looks slow rather than broken. KeepAlive, and
@@ -44,7 +44,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/elsie/.local/jdk/Contents/Home/bin:/Users/elsie/.local/platform-tools:/Users/elsie/.local/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__JAVA_HOME__/bin:__ANDROID_PLATFORM_TOOLS__:__NODE_BIN_DIR__:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <!-- Same machine as the collector, so loopback: no dependency on the LAN
          address, and it keeps working if the host's IP ever changes. -->
     <key>FLEET_URL</key>
@@ -52,21 +52,21 @@
     <key>FLEET_EXECUTOR_NAME</key>
     <string>fleet-host</string>
     <key>ADB_BIN</key>
-    <string>/Users/elsie/.local/platform-tools/adb</string>
+    <string>__ADB_BIN__</string>
     <key>MAESTRO_BIN</key>
-    <string>/Users/elsie/.maestro/bin/maestro</string>
+    <string>__MAESTRO_BIN__</string>
     <key>JAVA_HOME</key>
-    <string>/Users/elsie/.local/jdk/Contents/Home</string>
+    <string>__JAVA_HOME__</string>
     <key>FLEET_FLOWS_DIR</key>
-    <string>/Users/elsie/fleet-collector/flows</string>
+    <string>__FLEET_HOME__/flows</string>
     <!-- Maestro phones home unless told not to. -->
     <key>MAESTRO_CLI_NO_ANALYTICS</key>
     <string>1</string>
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/elsie/Library/Logs/fleet-executor.log</string>
+  <string>__HOME__/Library/Logs/fleet-executor.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/elsie/Library/Logs/fleet-executor.log</string>
+  <string>__HOME__/Library/Logs/fleet-executor.log</string>
 </dict>
 </plist>

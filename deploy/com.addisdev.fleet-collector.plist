@@ -7,16 +7,20 @@
 
   <!-- Invoked the same way `npm start` invokes it, minus npm: tsx's CLI, run by
        an absolute node. A LaunchAgent inherits no login PATH, so nothing here
-       may rely on a shell resolving a command name. -->
+       may rely on a shell resolving a command name.
+
+       The placeholders below are filled in by deploy/install-agent.sh. They are
+       not a nicety: launchd does not expand `~`, and a plist carrying someone
+       else's home directory fails by silently doing nothing. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
-    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/node_modules/tsx/dist/cli.mjs</string>
+    <string>__NODE__</string>
+    <string>__FLEET_HOME__/node_modules/tsx/dist/cli.mjs</string>
     <string>src/server.ts</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector</string>
+  <string>__FLEET_HOME__</string>
 
   <!-- The whole point: the fleet's devices long-poll this service, so a crash
        that leaves it down strands every runner until someone notices. Plain
@@ -41,11 +45,11 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>__NODE_BIN_DIR__:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>FLEET_DATA_DIR</key>
-    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/data</string>
+    <string>__FLEET_HOME__/data</string>
     <key>FLEET_ARTIFACT_DIR</key>
-    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/artifacts/store</string>
+    <string>__FLEET_HOME__/artifacts/store</string>
     <!-- 8788: 8787 was taken by another project's dev dashboard on this Mac,
          and a KeepAlive collector that can't bind just respawns forever while
          every fleet client talks to the wrong service. -->
@@ -68,8 +72,8 @@
   <!-- launchd does not rotate these; the collector logs a line per request, so
        check the size occasionally. -->
   <key>StandardOutPath</key>
-  <string>/Users/addisdev/Library/Logs/fleet-collector.log</string>
+  <string>__HOME__/Library/Logs/fleet-collector.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/addisdev/Library/Logs/fleet-collector.log</string>
+  <string>__HOME__/Library/Logs/fleet-collector.log</string>
 </dict>
 </plist>

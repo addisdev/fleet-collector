@@ -1,7 +1,7 @@
 #!/bin/bash
 # Adopt a spare Mac as the fleet's always-on collector host.
 #
-#   ./adopt-fleet-host.sh taddison@fleet-host.local [alias]
+#   ./adopt-fleet-host.sh user@spare-mac.local [alias]
 #
 # Assumes key auth already works (run `ssh-copy-id -i ~/.ssh/id_ed25519.pub
 # user@host` once from your own terminal first — it needs a password, which
@@ -61,9 +61,9 @@ else
   cp ~/.ssh/config ~/.ssh/config.bak-$(date +%Y%m%d-%H%M%S) 2>/dev/null
   cat >> ~/.ssh/config <<CONF
 
-# The fleet's always-on collector host. Lives on the 192.168.50.x subnet
-# alongside the phones, so the devices can reach the collector directly and
-# mDNS resolves without help.
+# The fleet's always-on collector host. Lives on the same subnet as the
+# phones, so the devices can reach the collector directly and mDNS resolves
+# without help.
 Host ${ALIAS} ${HOST%.local}
     HostName ${HOST}
     User ${USER_NAME}

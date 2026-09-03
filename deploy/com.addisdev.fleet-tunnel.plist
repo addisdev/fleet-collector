@@ -8,7 +8,8 @@
   <!-- Loopback to the collector, for the iOS executor on this workstation.
        macOS 26+ gates local-network access per app, and a process started by
        launchd has no grant and no way to prompt for one: the same node binary
-       that reaches 192.168.50.27 from Terminal gets EHOSTUNREACH under launchd.
+       that reaches the collector's LAN address from Terminal gets EHOSTUNREACH
+       under launchd.
        Loopback is not gated, so the executor talks to 127.0.0.1:18788 and ssh
        carries it to fleet-host.
 
@@ -27,6 +28,12 @@
     <string>-o</string><string>ServerAliveInterval=30</string>
     <string>-o</string><string>ServerAliveCountMax=3</string>
     <string>-L</string><string>18788:127.0.0.1:8788</string>
+    <!-- Reverse: fleet-host's own loopback 8790 lands on this Mac's alert
+         receiver. The collector is a launchd agent and cannot reach a LAN
+         address, and fleet-host is headless, so this is how a red nightly
+         becomes a notification somebody sees. Binds fleet-host's loopback
+         only, which is why no GatewayPorts change is needed there. -->
+    <string>-R</string><string>8790:127.0.0.1:8790</string>
     <string>fleet-host</string>
   </array>
 
@@ -38,8 +45,8 @@
   <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/addisdev/Library/Logs/fleet-tunnel.log</string>
+  <string>__HOME__/Library/Logs/fleet-tunnel.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/addisdev/Library/Logs/fleet-tunnel.log</string>
+  <string>__HOME__/Library/Logs/fleet-tunnel.log</string>
 </dict>
 </plist>

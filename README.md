@@ -109,8 +109,8 @@ then `FLEET_URL=http://127.0.0.1:8799 npm run smoke`.
 
 ## Where it runs
 
-The collector lives on **fleet-host** (`C02TF32MGTFM.local`, `192.168.50.27:8788`)
-— a 2016 MacBook Pro that does nothing else. It is deliberately sudo-free:
+The collector lives on **fleet-host** (`fleet-host.local:8788`) — a spare
+2016 MacBook Pro that does nothing else. It is deliberately sudo-free:
 Node is a user-local tarball in `~/.local/node`, the service is a LaunchAgent in
 `~/Library/LaunchAgents`, and `better-sqlite3` installs from a prebuild, so the
 whole stack can be rebuilt over SSH with nobody at the keyboard. Deploy with
@@ -121,11 +121,13 @@ Executors stay on whichever machine the devices are physically attached to —
 they reach the collector over the LAN with `FLEET_URL`:
 
 ```bash
-FLEET_URL=http://192.168.50.27:8788 npm run executor
+FLEET_URL=http://fleet-host.local:8788 npm run executor
 ```
 
-Runner apps default to that address too. Give the host a DHCP reservation; a
-lease change would strand every device at once.
+Runner apps ship with a loopback default and take the host's address in their
+own settings screen, so nothing is baked into a binary. Give the host a DHCP
+reservation, or reach it by its `.local` name; a lease change would otherwise
+strand every device at once.
 
 ## Running under launchd
 
@@ -134,10 +136,17 @@ keeps the collector up: `KeepAlive` revives it however it dies, which is the
 point — the fleet's devices long-poll this service, so a crash that goes
 unnoticed strands every runner.
 
+The plists in `deploy/` are templates: they carry `__PLACEHOLDER__` paths
+rather than anyone's home directory, because a LaunchAgent cannot expand `~`
+and an absolute path that is wrong fails in the least obvious way possible.
+[`deploy/install-agent.sh`](deploy/install-agent.sh) fills them in from the
+machine it runs on and loads the result:
+
 ```bash
-cp deploy/com.addisdev.fleet-collector.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.addisdev.fleet-collector.plist
+deploy/install-agent.sh com.addisdev.fleet-collector.plist
 ```
+
+Pass `--print` to see the filled-in plist without installing it.
 
 - **Stop it** with `launchctl bootout gui/$(id -u)/com.addisdev.fleet-collector`.
   Killing the process does nothing lasting; launchd starts it straight back.
@@ -446,8 +455,8 @@ anything not pinned is claimable by whichever executor is free.
 
 macOS 26+ gates local-network access per app, and a process started by launchd
 has no grant and no way to prompt for one. The same node binary that reaches
-`192.168.50.27` from Terminal gets `EHOSTUNREACH` under launchd — confirmed by
-running the same fetch both ways.
+the collector's LAN address from Terminal gets `EHOSTUNREACH` under launchd —
+confirmed by running the same fetch both ways.
 
 So [`deploy/com.addisdev.fleet-tunnel.plist`](deploy/com.addisdev.fleet-tunnel.plist)
 forwards `127.0.0.1:18788` to the collector and the executor talks to loopback,
@@ -505,9 +514,20 @@ from a silent device describes whenever it went silent, not now. And a device
 reporting `-1` has no battery telemetry rather than a flat one.
 
 Set `FLEET_ALERT_WEBHOOK` to push newly opened alerts to ntfy or any webhook
-receiver; unset (the default) makes the dashboard the only channel. Acknowledge
-keeps an alert listed but stops it nagging; snooze quiets it for N minutes and it
-returns on its own. Only the condition clearing resolves an alert.
+receiver; unset (the default) makes the dashboard the only channel.
+
+For a desktop notification instead of a hosted service,
+[`scripts/alert-receiver.ts`](scripts/alert-receiver.ts) is a local webhook
+target that raises a macOS notification, installed with
+[`deploy/com.addisdev.fleet-alert-receiver.plist`](deploy/com.addisdev.fleet-alert-receiver.plist).
+It runs on the machine somebody is actually looking at, not on the headless
+host: point `FLEET_ALERT_WEBHOOK` at the collector's own `127.0.0.1:8790` and
+let the tunnel's reverse forward deliver it. Loopback at both ends — the alert
+never crosses the LAN and never leaves the house.
+
+Acknowledge keeps an alert listed but stops it nagging; snooze quiets it for N
+minutes and it returns on its own. Only the condition clearing resolves an
+alert.
 
 ## Leases
 

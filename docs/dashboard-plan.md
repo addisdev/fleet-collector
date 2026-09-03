@@ -74,7 +74,7 @@ fleet-collector/
 
 **Decisions**
 
-- **Same process, same SQLite.** The dashboard is served by the collector, not a second service. One thing to keep alive under launchd, one URL (`http://192.168.50.27:8788/dash`), no CORS. Reads go through prepared statements with hard `LIMIT`s; SQLite WAL means dashboard reads never block device long-polls.
+- **Same process, same SQLite.** The dashboard is served by the collector, not a second service. One thing to keep alive under launchd, one URL (`http://fleet-host.local:8788/dash`), no CORS. Reads go through prepared statements with hard `LIMIT`s; SQLite WAL means dashboard reads never block device long-polls.
 - **JSON API first, UI second.** Every screen is backed by a `/api/*` endpoint that `curl` and future scripts can use. The old server-rendered `/dash` moves to `/dash/legacy` on day one and is removed once parity is reached.
 - **Preact + Vite, no framework beyond that.** Small bundle (the collector host is a 2016 MacBook and the dashboard will be opened on phones on the shelf), TypeScript shared with the collector for the job/result types, `uPlot` for charts (≈40 KB, handles thousands of beacon points). Dark mode via `prefers-color-scheme` like today.
 - **Live updates over SSE, not WebSockets.** `GET /api/stream` pushes `{type: "job"|"device"|"result"|"beacon", …}` events. The collector already has single write paths for each table (`POST /results`, `/jobs`, `/devices/register`, sweep, scheduler) — emit from those; no polling loop and no external broker (matches the events-rails philosophy).

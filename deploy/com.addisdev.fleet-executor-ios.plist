@@ -18,13 +18,13 @@
        targets.executor rather than left to whichever executor is free. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
-    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/node_modules/tsx/dist/cli.mjs</string>
+    <string>__NODE__</string>
+    <string>__FLEET_HOME__/node_modules/tsx/dist/cli.mjs</string>
     <string>src/executor.ts</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector</string>
+  <string>__FLEET_HOME__</string>
 
   <key>KeepAlive</key>
   <true/>
@@ -38,7 +38,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/addisdev/Library/Android/sdk/platform-tools</string>
+    <string>__NODE_BIN_DIR__:/usr/bin:/bin:/usr/sbin:/sbin:__ANDROID_PLATFORM_TOOLS__</string>
     <!-- Loopback, not the LAN address. macOS gates local-network access per
          app and a launchd-started process has no grant and cannot prompt for
          one, so the LAN address returns EHOSTUNREACH here while working fine
@@ -51,23 +51,23 @@
     <!-- The generic XCUITest bundle: one scheme that drives any app, told which
          one through FLEET_APP_ID / FLEET_ASSERTS at launch. -->
     <key>FLEET_IOS_PROJECT</key>
-    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-runner-ios/FleetRunner.xcodeproj</string>
+    <string>__IOS_PROJECT__</string>
     <!-- Playwright's browsers are installed in this user's home (sudo-free,
          like adb and Maestro). This flag is what lets the executor accept
          web-test; every other host refuses it rather than fail obscurely. -->
     <key>FLEET_WEB</key>
     <string>1</string>
     <key>MAESTRO_BIN</key>
-    <string>/Users/addisdev/.maestro/bin/maestro</string>
+    <string>__MAESTRO_BIN__</string>
     <key>MAESTRO_CLI_NO_ANALYTICS</key>
     <string>1</string>
     <key>FLEET_FLOWS_DIR</key>
-    <string>/Users/addisdev/Desktop/Fleet Runner/fleet-collector/flows</string>
+    <string>__FLEET_HOME__/flows</string>
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/addisdev/Library/Logs/fleet-executor-ios.log</string>
+  <string>__HOME__/Library/Logs/fleet-executor-ios.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/addisdev/Library/Logs/fleet-executor-ios.log</string>
+  <string>__HOME__/Library/Logs/fleet-executor-ios.log</string>
 </dict>
 </plist>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.addisdev.fleet-alert-receiver</string>
+
+  <!-- Turns a fleet alert into a macOS notification on the machine somebody is
+       actually looking at.
+
+       fleet-host is headless, so notifying there notifies nobody, and the
+       collector is a launchd agent that macOS 26 will not let reach a LAN
+       address. So com.addisdev.fleet-tunnel carries a REVERSE forward: the
+       collector posts to its own 127.0.0.1:8790 and ssh delivers it here.
+       Loopback at both ends; nothing crosses the LAN and nothing leaves it.
+
+       Install this on the workstation, not on fleet-host. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__FLEET_HOME__/node_modules/tsx/dist/cli.mjs</string>
+    <string>scripts/alert-receiver.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__FLEET_HOME__</string>
+
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/fleet-alert-receiver.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/fleet-alert-receiver.log</string>
+</dict>
+</plist>
