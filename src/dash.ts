@@ -68,7 +68,7 @@ export function renderBench(): string {
     .join("");
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Fleet Benchmarks</title>
+<html><head><meta charset="utf-8"><title>Fleet Benchmarks</title><link rel="icon" type="image/svg+xml" href="/dash/favicon.svg">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>${SHARED_CSS}</style></head><body>
 <h1>Fleet Benchmarks <a href="/dash/legacy" style="font-size:0.8rem">← dashboard</a></h1>
@@ -152,7 +152,7 @@ export function renderDash(): string {
     .join("");
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Fleet Collector</title>
+<html><head><meta charset="utf-8"><title>Fleet Collector</title><link rel="icon" type="image/svg+xml" href="/dash/favicon.svg">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>${SHARED_CSS}</style></head><body>
 <h1>Fleet Collector <a href="/dash/legacy/bench" style="font-size:0.8rem">benchmarks →</a></h1>

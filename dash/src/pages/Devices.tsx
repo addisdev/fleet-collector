@@ -1,6 +1,7 @@
 // The shelf. What is online, what it is doing, and how to get to it.
 import { useState } from "preact/hooks";
 import { useApi, type Device, type DeviceList } from "../api.js";
+import { Icon } from "../icons.js";
 import { mutate, useMutation } from "../mutate.js";
 import { refreshNames } from "../names.js";
 import { useQuery } from "../router.js";
@@ -80,17 +81,24 @@ export function Battery({ pct, charging }: { pct: number | null; charging: boole
   // Simulators report -1 rather than a battery level. Showing "-1%" would look
   // like a reading; it is the absence of one.
   if (pct < 0) return <span class="faint" title="Device reports no battery telemetry">n/a</span>;
-  const tone = pct < 15 && !charging ? "bad" : pct < 30 && !charging ? "warn" : "";
+  // .text-bad / .text-warn are the word-colouring classes; bare .bad and
+  // .warn only exist scoped to stat tiles, so a low battery never went red.
+  const tone = pct < 15 && !charging ? "text-bad" : pct < 30 && !charging ? "text-warn" : "";
   return (
-    <span class={tone} title={charging ? "charging" : "on battery"}>
-      {pct}%{charging ? " ⚡" : ""}
+    <span class={tone ? `with-icon ${tone}` : "with-icon"} title={charging ? "charging" : "on battery"}>
+      {pct}%{charging && <Icon name="charging" title="charging" />}
     </span>
   );
 }
 
 export function Thermal({ state }: { state: string | null }) {
   if (!state) return <span class="faint">—</span>;
-  return <span class={`th-text th-${state}`}>{state}</span>;
+  return (
+    <span class={`with-icon th-text th-${state}`}>
+      <Icon name="thermal" />
+      {state}
+    </span>
+  );
 }
 
 export function Devices() {
@@ -165,8 +173,13 @@ export function Devices() {
                             <Link to={`/devices/${encodeURIComponent(dev.device_id)}`} class="faint open-link">
                               open
                             </Link>{" "}
-                            <Pill kind={dev.status} />
-                            {dev.simulator && <span class="faint"> simulator</span>}
+                            <Pill kind={dev.status} />{" "}
+                            {dev.simulator && (
+                              <span class="faint with-icon">
+                                <Icon name="simulator" />
+                                simulator
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td>

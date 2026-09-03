@@ -2,6 +2,7 @@ import { useKeyboard, SHORTCUTS } from "./keys.js";
 import { TokenBanner } from "./TokenBanner.js";
 import { useLiveState } from "./live.js";
 import { match, useRoute } from "./router.js";
+import { Glyph } from "./icons.js";
 import { Link, Panel } from "./ui.js";
 import { Compose } from "./pages/Compose.js";
 import { DeviceDetail } from "./pages/DeviceDetail.js";
@@ -127,7 +128,10 @@ export function App() {
     <div class="shell">
       <header class="topbar">
         <span class="brand">
-          Fleet Runner <span>collector</span>
+          <Glyph />
+          <span>
+            Fleet Runner <span>collector</span>
+          </span>
         </span>
         <nav class="nav">
           {NAV.map(([to, label]) => (

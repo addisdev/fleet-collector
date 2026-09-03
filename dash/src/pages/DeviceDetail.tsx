@@ -4,6 +4,7 @@ import { ThermalStrip, TimeSeries, runs } from "../chart.js";
 import { mutate, useMutation } from "../mutate.js";
 import { navigate, useQuery } from "../router.js";
 import { Actions, Button, ConfirmButton, CopyId, ErrorBox, Field, Json, Link, Loaded, Panel, Pill, Stat, agoFrom, clock, num } from "../ui.js";
+import { Icon, Workload } from "../icons.js";
 import { Battery, Thermal } from "./Devices.js";
 
 const WINDOWS = [6, 24, 72, 168];
@@ -121,7 +122,15 @@ export function DeviceDetail({ id }: { id: string }) {
               aside={
                 <span>
                   <Pill kind={d.status} />
-                  {d.simulator && <span class="faint"> · simulator</span>}
+                  {d.simulator && (
+                    <span class="faint">
+                      {" · "}
+                      <span class="with-icon">
+                        <Icon name="simulator" />
+                        simulator
+                      </span>
+                    </span>
+                  )}
                 </span>
               }
             >
@@ -257,7 +266,7 @@ export function DeviceDetail({ id }: { id: string }) {
                             </Link>
                           </td>
                           <td>
-                            {j.workload} <span class="faint">{j.executor}</span>
+                            <Workload name={j.workload} /> <span class="faint">{j.executor}</span>
                           </td>
                           <td>
                             <Pill kind={j.status} />

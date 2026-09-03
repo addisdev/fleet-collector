@@ -1,5 +1,6 @@
 // The "is the fleet OK" screen. One request, five answers.
 import { useApi, type Overview as OverviewData, type RecentResults } from "../api.js";
+import { Workload } from "../icons.js";
 import { useDeviceNames } from "../names.js";
 import { DeviceName, Link, Loaded, Panel, Pill, Stat, ago, agoFrom, clock, duration } from "../ui.js";
 
@@ -96,7 +97,7 @@ export function Overview() {
                           </Link>
                         </td>
                         <td>
-                          {j.workload} <span class="faint">{j.executor}</span>
+                          <Workload name={j.workload} /> <span class="faint">{j.executor}</span>
                         </td>
                         <td class="wrap-anywhere">
                           {j.claimed_by ? <DeviceName id={j.claimed_by} names={names} /> : <span class="faint">—</span>}
@@ -130,7 +131,9 @@ export function Overview() {
                               <code>{j.job_id}</code>
                             </Link>
                           </td>
-                          <td>{j.workload}</td>
+                          <td>
+                            <Workload name={j.workload} />
+                          </td>
                           <td class="dim">{clock(j.finished_at)}</td>
                           <td class="num">
                             {j.attempts}/{j.max_attempts}

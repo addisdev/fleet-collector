@@ -1,4 +1,5 @@
 import { useApi, type JobDetail as Detail, type ResultRow } from "../api.js";
+import { Workload } from "../icons.js";
 import { mutate, useMutation } from "../mutate.js";
 import { navigate } from "../router.js";
 import { useDeviceNames } from "../names.js";
@@ -131,7 +132,10 @@ export function JobDetail({ id }: { id: string }) {
               title="Status"
               aside={
                 <span>
-                  <Pill kind={j.status} /> <span class="faint">{j.workload} · {j.executor}</span>
+                  <Pill kind={j.status} />{" "}
+                  <span class="faint">
+                    <Workload name={j.workload} /> · {j.executor}
+                  </span>
                 </span>
               }
             >
