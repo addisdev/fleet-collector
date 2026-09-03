@@ -9,7 +9,11 @@
     "skipLibCheck": true,
     "jsx": "react-jsx",
     "jsxImportSource": "preact",
-    "types": ["vite/client"],
+    // "node" because vite.config.ts reads process.env. Without it the
+    // dashboard typechecks only when the collector's node_modules happen to
+    // be installed one directory up, which is a build that works until
+    // somebody builds the dashboard on its own.
+    "types": ["vite/client", "node"],
     "verbatimModuleSyntax": true
   },
   "include": ["src", "vite.config.ts"]
