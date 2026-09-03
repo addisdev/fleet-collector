@@ -1,0 +1,6 @@
+{
+  "profiles": ["chromium", "webkit", "mobile-chrome", "mobile-safari"],
+  "pages": [
+    { "name": "home", "path": "/", "fullPage": true, "waitFor": "main" }
+  ]
+}

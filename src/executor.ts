@@ -1,12 +1,19 @@
 // Host executor: claims executor:"host" jobs and drives attached Android
 // devices from outside via adb + Maestro. Runs on the Mac next to the
 // collector (iOS support arrives in Phase 3 via devicectl/XCUITest).
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import pixelmatch from "pixelmatch";
+import { PNG } from "pngjs";
+import {
+  exec, BASE, NAME, log, postResult, postBeacon, fetchArtifact, uploadArtifact,
+  leaseBudgetS,
+} from "./fleet-client.js";
+import { runWebUnfurl } from "./web/unfurl.js";
+import { runWebAudit } from "./web/audit.js";
+import { runArchive } from "./web/archive/index.js";
+import { runDigest } from "./web/digest.js";
 import { countXcodebuildTests, xcodebuildDiagnostics } from "./xcparse.js";
 import {
   fleetOwned, physicalIos, simulatorName, isAndroidEmulatorSerial, iosNotReadyReason,
@@ -16,17 +23,16 @@ import {
 import { evalMatch } from "./match.js";
 import { keychainPassword, redact, KEYCHAIN_SERVICE } from "./secrets.js";
 
-const exec = promisify(execFile);
-
-const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
-const NAME = process.env.FLEET_EXECUTOR_NAME ?? os.hostname().replace(/\.local$/, "");
 const FLOWS_DIR = process.env.FLEET_FLOWS_DIR ?? path.resolve("flows");
 const MAESTRO = process.env.MAESTRO_BIN ?? path.join(os.homedir(), ".maestro/bin/maestro");
 const ADB = process.env.ADB_BIN ?? "adb";
 
-type Job = {
+export type Job = {
   job_id: string;
   workload: string;
+  // ML workloads name the model artifact; digest forwards it into the batch
+  // jobs it enqueues.
+  model?: Record<string, unknown>;
   app?: { name: string; build: string; sha256: string; platform?: "android" | "ios" };
   suite?: {
     kind: string; flows?: string; app_id?: string; asserts?: string[];
@@ -38,6 +44,15 @@ type Job = {
     // the executor host and never travels in a job spec, because specs are
     // stored, served by the API and rendered on the dashboard.
     credentials?: { account: string; email_var?: string; password_var?: string };
+    // TCC permissions to pre-grant on simulator targets before the tests run
+    // (`xcrun simctl privacy grant <service> <bundle>`). A permission dialog a
+    // suite does not handle is worse than a failure: it sits on the shared
+    // simulator blocking every job after this one. `service` is whatever
+    // simctl accepts (location, location-always, photos, ...); `bundle_id`
+    // defaults to the suite's app_id. Simulators only -- a physical device has
+    // no simctl, so a suite that runs on devices still needs an interruption
+    // monitor.
+    permissions?: { service: string; bundle_id?: string }[];
   };
   targets?: {
     pool?: string; exclusive?: boolean; executor?: string; url?: string;
@@ -56,21 +71,6 @@ const IOS_PROJECT = process.env.FLEET_IOS_PROJECT ??
   path.resolve("../fleet-runner-ios/FleetRunner.xcodeproj");
 
 type Target = { id: string; platform: "android" | "ios"; kind?: "device" | "simulator" };
-
-const log = (msg: string) => console.log(`[executor:${NAME}] ${msg}`);
-
-async function post(url: string, body: unknown) {
-  const res = await fetch(`${BASE}${url}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`POST ${url} -> ${res.status}`);
-}
-
-async function postResult(row: Record<string, unknown>) {
-  await post("/results", { schema: 1, kind: "result", ...row });
-}
 
 // Exclusive jobs hold the collector's device locks while they run, so a
 // device-executor agent never gets handed work mid-UI-test.
@@ -220,25 +220,6 @@ async function hasApp(target: Target, appId: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function fetchArtifact(sha256: string, dest: string) {
-  const res = await fetch(`${BASE}/artifacts/${sha256}`);
-  if (!res.ok) throw new Error(`artifact ${sha256} -> ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  const got = createHash("sha256").update(buf).digest("hex");
-  if (got !== sha256) throw new Error(`artifact hash mismatch: ${got}`);
-  writeFileSync(dest, buf);
-}
-
-async function uploadArtifact(file: string, name: string): Promise<string> {
-  const res = await fetch(`${BASE}/artifacts`, {
-    method: "POST",
-    headers: { "content-type": "application/octet-stream", "x-artifact-name": name },
-    body: readFileSync(file),
-  });
-  if (!res.ok) throw new Error(`artifact upload -> ${res.status}`);
-  return ((await res.json()) as { sha256: string }).sha256;
 }
 
 async function runInstall(job: Job) {
@@ -447,6 +428,14 @@ async function runXcuitest(job: Job) {
   // nightly that tests that the app launches.
   const creds = await resolveCredentials(suite, NAME);
 
+  // Resolved before the loop so a spec that cannot name a bundle fails the
+  // job with one clear message instead of failing per-target.
+  const perms = (suite.permissions ?? []).map((p) => {
+    const bundle = p.bundle_id ?? appId;
+    if (!bundle) throw new Error(`suite.permissions entry "${p.service}" needs a bundle_id (this suite has no app_id)`);
+    return { service: p.service, bundle };
+  });
+
   const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === "ios"));
   if (targets.length === 0) throw new Error("no iOS targets matched this job");
 
@@ -476,6 +465,34 @@ async function runXcuitest(job: Job) {
       }
       if (target.kind !== "simulator") {
         log(`provisioning updates allowed for ${target.id} (may register it with the Apple team)`);
+      }
+      // Pre-grant TCC permissions so no system dialog ever appears. The grant
+      // is recorded by bundle id whether or not the app is installed yet, so
+      // it works for own-project suites that install during the test action.
+      // A grant that fails means the dialog WILL appear and the suite WILL
+      // hang on it -- and worse, the dialog outlives the job on a shared
+      // simulator -- so a failed grant fails this target rather than running.
+      if (perms.length > 0 && target.kind === "simulator") {
+        let grantError = "";
+        for (const p of perms) {
+          try {
+            await exec("xcrun", ["simctl", "privacy", target.id, "grant", p.service, p.bundle], { timeout: 30_000 });
+            log(`granted ${p.service} to ${p.bundle} on ${target.id}`);
+          } catch (e) {
+            grantError = `simctl privacy grant ${p.service} ${p.bundle} failed: ` +
+              (((e as { stderr?: string }).stderr ?? (e as Error).message) || "unknown error").trim().slice(-500);
+            break;
+          }
+        }
+        if (grantError) {
+          allOk = false;
+          await postResult({ job_id: job.job_id, device_id: target.id, iter: 0, ok: false, error: grantError });
+          log(`xcuitest on ${target.id}: ${grantError}`);
+          continue;
+        }
+      } else if (perms.length > 0) {
+        // No simctl for hardware; the suite must handle the dialog itself.
+        log(`permissions not pre-granted on ${target.id} (physical device; needs an interruption monitor)`);
       }
       let ok = true;
       let logTail = "";
@@ -685,12 +702,6 @@ async function runUiTest(job: Job) {
     if (granted) await releaseLocks(job.job_id);
   }
   await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
-}
-
-async function postBeacon(jobId: string, deviceId: string, extra: Record<string, unknown>) {
-  await post("/results", {
-    schema: 1, kind: "beacon", job_id: jobId, device_id: deviceId, beacon: extra,
-  });
 }
 
 async function launchApp(target: Target, appId: string) {
@@ -940,7 +951,6 @@ async function runWebTest(job: Job) {
   const url = job.targets?.url;
   if (!url) throw new Error("web-test needs targets.url");
   const spec = (job.suite?.flows as string | undefined) ?? ".";
-  const browser = (job.params?.browser as string | undefined) ?? "chromium";
   const specRoot = path.resolve(WEB_SPECS_DIR);
   const specDir = path.resolve(specRoot, spec);
   // The separator matters: a bare prefix test lets `../web-specs-evil` through,
@@ -962,25 +972,72 @@ async function runWebTest(job: Job) {
     return;
   }
 
-  const deviceId = `web:${browser}`;
-  const out = mkdtempSync(path.join(os.tmpdir(), `web-${job.job_id}-`));
+  // Which config projects to run: one name, an array run in sequence, or "all".
+  // "all" asks Playwright for the resolved config rather than keeping a copy of
+  // the project names here — a copy is how a project added to the config would
+  // silently never run in the nightly that exists to run everything.
+  const asked = job.params?.browser ?? "chromium";
+  const projects = asked === "all"
+    ? await listWebProjects()
+    : (Array.isArray(asked) ? asked.map(String) : [String(asked)]);
+  if (projects.length === 0) throw new Error("params.browser named no projects");
 
-  // Nothing beacons during a web run, so the lease cannot be renewed: the
-  // process must finish inside it or the sweep requeues a job that is still
-  // running and a second executor runs the same suite concurrently.
-  // next-job reports the lease the collector granted. Stop a little short of
-  // it so a timing-out run reports its own failure rather than being swept
-  // mid-flight and silently re-run by whoever claims it next.
-  const lease = Number(job.lease?.ttl_s);
-  const asked = Number(job.params?.timeout_s);
-  const budgetS = Number.isFinite(asked) && asked > 0
-    ? asked
-    : (Number.isFinite(lease) && lease > 30 ? lease - 30 : 570);
-  const timeoutS = Math.max(30, budgetS);
+  // Nothing beacons DURING a single project's run, so each one must finish
+  // inside the lease or the sweep requeues a job that is still running and a
+  // second executor runs the same suite concurrently. Between projects a
+  // beacon renews the lease, which is what lets a matrix of N projects run on
+  // the same lease one project needs. next-job reports the lease the collector
+  // granted. Stop a little short of it so a timing-out run reports its own
+  // failure rather than being swept mid-flight and silently re-run by whoever
+  // claims it next.
+  const timeoutS = leaseBudgetS(job);
+
+  let allOk = true;
+  for (const [i, project] of projects.entries()) {
+    if (i > 0) await postBeacon(job.job_id, `web:${project}`, {}).catch(() => {});
+    const ok = await runWebProject(job, url, specDir, project, timeoutS);
+    if (!ok) allOk = false;
+  }
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
+}
+
+/** Every file under dir, named by its path relative to dir. */
+function walkFiles(dir: string, rel: string): { file: string; name: string }[] {
+  const found: { file: string; name: string }[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, e.name);
+    const r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) found.push(...walkFiles(abs, r));
+    else if (e.isFile()) found.push({ file: abs, name: r });
+  }
+  return found;
+}
+
+/** The project names playwright.config.ts resolves to, via --list. */
+async function listWebProjects(): Promise<string[]> {
+  const { stdout } = await exec("npx", ["playwright", "test", "--list", "--reporter=json"], {
+    timeout: 120_000,
+    env: { ...process.env, CI: "1" },
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const report = JSON.parse(stdout.slice(stdout.indexOf("{"))) as {
+    config?: { projects?: { name?: string }[] };
+  };
+  const names = [...new Set((report.config?.projects ?? []).map((p) => p.name ?? "").filter(Boolean))];
+  if (names.length === 0) throw new Error("playwright --list reported no projects");
+  return names;
+}
+
+/** One config project against the URL; posts its own result row. */
+async function runWebProject(
+  job: Job, url: string, specDir: string, project: string, timeoutS: number,
+): Promise<boolean> {
+  const deviceId = `web:${project}`;
+  const out = mkdtempSync(path.join(os.tmpdir(), `web-${job.job_id}-${project}-`));
 
   const args = [
     "playwright", "test", specDir,
-    `--project=${browser}`,
+    `--project=${project}`,
     "--reporter=json",
     `--output=${out}`,
   ];
@@ -1021,18 +1078,10 @@ async function runWebTest(job: Job) {
   // .last-run.json and silently loses everything that makes a red suite
   // debuggable, so walk the tree and name each file by its relative path.
   const artifacts: string[] = [];
-  const walk = (dir: string, rel: string) => {
-    const found: { file: string; name: string }[] = [];
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const abs = path.join(dir, e.name);
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) found.push(...walk(abs, r));
-      else if (e.isFile()) found.push({ file: abs, name: r });
-    }
-    return found;
-  };
-  for (const f of (existsSync(out) ? walk(out, "") : [])) {
-    artifacts.push(await uploadArtifact(f.file, `${job.job_id}-${f.name.replace(/\//g, "_")}`));
+  for (const f of (existsSync(out) ? walkFiles(out, "") : [])) {
+    // The project is part of the name: two projects failing the same test
+    // otherwise upload artifacts under identical names.
+    artifacts.push(await uploadArtifact(f.file, `${job.job_id}-${project}-${f.name.replace(/\//g, "_")}`));
   }
 
   await postResult({
@@ -1040,8 +1089,472 @@ async function runWebTest(job: Job) {
     ok, test: { passed, failed, artifacts },
     error: ok ? undefined : detail || `${failed} failing`,
   });
-  log(`web-test ${url} (${browser}): ${passed} passed / ${failed} failed in ${((Date.now() - started) / 1000).toFixed(0)}s`);
-  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok });
+  log(`web-test ${url} (${project}): ${passed} passed / ${failed} failed in ${((Date.now() - started) / 1000).toFixed(0)}s`);
+  return ok;
+}
+
+type ShotsManifest = {
+  profiles?: string[];
+  threshold_pct?: number;
+  freeze_time?: string;
+  pages?: {
+    name?: string; path?: string; waitFor?: string; mask?: string[];
+    fullPage?: boolean; threshold_pct?: number; settle_ms?: number;
+  }[];
+};
+
+/**
+ * A profile the matrix captures under. Most are playwright.config.ts project
+ * names run via the _shots spec; two are meta-names that expand to real
+ * hardware attached to THIS host:
+ *
+ *   "android-device"  -> one `android:<serial>` profile per fleet-owned
+ *                        Android device, real Chrome driven over adb
+ *   "ios-sim-safari"  -> one `ios-sim:<name>` profile per booted fleet-owned
+ *                        simulator, Safari via simctl
+ *
+ * Expansion is per-device on purpose: two phones have two screens, so they
+ * are two baselines — collapsing them under one profile would diff a Pixel
+ * against an S21 and call the hardware difference a regression.
+ *
+ * `missing` marks a meta-name that expanded to nothing here: the profile the
+ * manifest asked for cannot run on this host, and the run must say so rather
+ * than quietly shrink. (Split device profiles into their own job pinned to
+ * the executor whose shelf holds the hardware.)
+ */
+type WebProfile = {
+  profile: string;
+  target?: { kind: "android" | "ios-sim"; id: string };
+  missing?: string;
+};
+
+async function expandWebProfiles(names: string[]): Promise<WebProfile[]> {
+  const out: WebProfile[] = [];
+  let all: Target[] | null = null;
+  const targets = async () => (all ??= await listTargets());
+  for (const name of names) {
+    if (name === "android-device") {
+      const owned: Target[] = [];
+      for (const t of (await targets()).filter((t) => t.platform === "android")) {
+        if (await fleetOwnedTarget(t, null)) owned.push(t);
+      }
+      if (owned.length === 0) out.push({ profile: name, missing: `no fleet-owned Android device attached to ${NAME}` });
+      for (const t of owned) out.push({ profile: `android:${t.id}`, target: { kind: "android", id: t.id } });
+    } else if (name === "ios-sim-safari") {
+      const sims = await simctlDevices();
+      const booted = (await targets()).filter((t) => t.platform === "ios" && t.kind === "simulator");
+      let any = false;
+      for (const t of booted) {
+        const nm = simulatorName(t.id, sims);
+        if (!fleetOwned(nm)) continue;
+        any = true;
+        out.push({ profile: `ios-sim:${nm ?? t.id}`, target: { kind: "ios-sim", id: t.id } });
+      }
+      if (!any) out.push({ profile: name, missing: `no booted fleet-owned simulator on ${NAME}` });
+    } else {
+      out.push({ profile: name });
+    }
+  }
+  return out;
+}
+
+/** Reject after `s` seconds — device captures must not outlive the lease. */
+function withTimeout<T>(p: Promise<T>, s: number, what: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} did not finish inside ${s}s`)), s * 1000).unref()),
+  ]);
+}
+
+// Mirrors the CSS the _shots spec injects; the android path drives a Page
+// directly, so it carries its own copy.
+const KILL_MOTION_CSS =
+  "*, *::before, *::after { animation: none !important; transition: none !important; caret-color: transparent !important; }";
+
+/**
+ * Real Chrome on a real (fleet-owned) Android device, via Playwright's
+ * android support over adb. Same determinism steps as the _shots spec; the
+ * PNGs land in the same layout, so the shared verdict/diff code downstream
+ * never knows a phone was involved.
+ *
+ * Dynamic import: this executor also runs on hosts that will never capture,
+ * and they should not pay to load playwright at startup.
+ */
+async function captureAndroidShots(
+  serial: string, manifest: ShotsManifest, url: string, outDir: string,
+): Promise<string> {
+  const { _android } = await import("playwright");
+  const devices = await _android.devices();
+  const device = devices.find((d) => d.serial() === serial);
+  if (!device) {
+    for (const d of devices) await d.close().catch(() => {});
+    throw new Error(`playwright's adb sees no device ${serial}`);
+  }
+  let detail = "";
+  try {
+    const context = await device.launchBrowser();
+    try {
+      const page = await context.newPage();
+      if (manifest.freeze_time) await page.clock.setFixedTime(new Date(manifest.freeze_time));
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      for (const p of manifest.pages ?? []) {
+        try {
+          await page.goto(new URL(p.path!, url).toString(), { waitUntil: "load", timeout: 30_000 });
+          if (p.waitFor) await page.locator(p.waitFor).first().waitFor({ timeout: 15_000 });
+          await page.addStyleTag({ content: KILL_MOTION_CSS });
+          await page.evaluate(() => document.fonts.ready.then(() => undefined));
+          await page.screenshot({
+            path: path.join(outDir, `${p.name}.png`),
+            fullPage: p.fullPage ?? true,
+            animations: "disabled",
+            mask: (p.mask ?? []).map((s) => page.locator(s)),
+          });
+        } catch (e) {
+          // Leave the PNG absent; the per-page row downstream reports it. Keep
+          // the first failure as the run's detail — later ones usually echo it.
+          if (!detail) detail = (e as Error).message.slice(0, 200);
+        }
+      }
+    } finally {
+      await context.close().catch(() => {});
+    }
+  } finally {
+    await device.close().catch(() => {});
+    for (const d of devices) if (d !== device) await d.close().catch(() => {});
+  }
+  return detail;
+}
+
+/**
+ * Safari on a booted fleet simulator: openurl, settle, screenshot. True
+ * WebKit rendering with none of Playwright's control — no waitFor, no masks,
+ * no fullPage, and Safari's own chrome is in frame. The status bar is pinned
+ * (Apple's own 9:41, full battery) so the clock does not diff against itself
+ * nightly; `settle_ms` per page stands in for waitFor.
+ *
+ * The simulator is shared state, and the capture inherits it: a system dialog
+ * another job left up, or a "back to app" breadcrumb from whatever opened
+ * Safari last, is in the shot. That is deliberate — dismissing a dialog some
+ * suspended XCUITest is waiting on would break THAT job to prettify this one.
+ * A polluted shot diffs red, a person sees why on the review grid, and the
+ * fix is fleet hygiene, not capture cleverness.
+ */
+async function captureSimSafariShots(
+  udid: string, manifest: ShotsManifest, url: string, outDir: string,
+): Promise<string> {
+  let detail = "";
+  await exec("xcrun", ["simctl", "status_bar", udid, "override",
+    "--time", "9:41", "--batteryState", "charged", "--batteryLevel", "100",
+    "--wifiBars", "3", "--cellularBars", "4"], { timeout: 30_000 }).catch(() => {});
+  try {
+    // Cold-start warm-up. The first openurl may LAUNCH Safari, and a shot
+    // taken on a per-page settle budget catches it mid-launch — observed as a
+    // black screen where the page should be, accepted as a 97%-wrong
+    // baseline. Open the first page and give the launch its own budget before
+    // any capture; ready-and-idle is what makes the per-page settle honest.
+    const first = manifest.pages?.[0];
+    if (first) {
+      await exec("xcrun", ["simctl", "openurl", udid, new URL(first.path!, url).toString()], { timeout: 30_000 }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 8000));
+    }
+    for (const p of manifest.pages ?? []) {
+      try {
+        await exec("xcrun", ["simctl", "openurl", udid, new URL(p.path!, url).toString()], { timeout: 30_000 });
+        await new Promise((r) => setTimeout(r, p.settle_ms ?? 4000));
+        await exec("xcrun", ["simctl", "io", udid, "screenshot", path.join(outDir, `${p.name}.png`)], { timeout: 30_000 });
+      } catch (e) {
+        if (!detail) detail = (e as Error).message.slice(0, 200);
+      }
+    }
+  } finally {
+    await exec("xcrun", ["simctl", "status_bar", udid, "clear"], { timeout: 30_000 }).catch(() => {});
+  }
+  return detail;
+}
+
+/**
+ * web-shots: the screenshot half of the visual-regression matrix.
+ *
+ * Captures every page in the suite's shots.json under each requested config
+ * project and uploads the PNGs. Capture only — baselines and diffing arrive
+ * with the collector's baselines table (Phase 3), so today's rows say "these
+ * pixels exist", not "these pixels are right".
+ *
+ * The actual browser work happens in web-specs/_shots/capture.spec.ts, run as
+ * a Playwright test so `--project=` means exactly what it means for web-test.
+ * Result shape follows drain: per-page rows at iter 1..N, a per-profile
+ * summary at iter 0, and the host row closing the job.
+ *
+ * Each captured page is diffed against the accepted baseline the collector
+ * holds for (suite, page, profile). Diffing happens HERE, on the one host that
+ * captures, because a baseline is only comparable to pixels rendered by the
+ * same machine — fonts and antialiasing differ across hosts, so moving the
+ * capture host invalidates every baseline, and pretending the collector could
+ * judge that would hide it. A page with no baseline reports ok with a note:
+ * the first capture of a new page must not fail the nightly, but must stay
+ * visible until someone accepts it.
+ */
+async function runWebShots(job: Job) {
+  const url = job.targets?.url;
+  if (!url) throw new Error("web-shots needs targets.url");
+  const spec = job.suite?.flows as string | undefined;
+  if (!spec) throw new Error("web-shots needs suite.flows (the web-specs/<site> directory holding shots.json)");
+  const specRoot = path.resolve(WEB_SPECS_DIR);
+  const specDir = path.resolve(specRoot, spec);
+  // Same separator rule as web-test: a bare prefix test lets `../web-specs-evil` through.
+  if (specDir !== specRoot && !specDir.startsWith(specRoot + path.sep)) {
+    throw new Error("suite.flows escapes the specs dir");
+  }
+  const manifestPath = path.join(specDir, "shots.json");
+  if (!existsSync(manifestPath)) throw new Error(`no shots manifest: ${manifestPath}`);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ShotsManifest;
+  const pages = manifest.pages ?? [];
+  if (pages.length === 0) throw new Error(`${manifestPath} lists no pages`);
+  // Page names become file names and artifact names, so they are validated
+  // here — before a browser launches — rather than discovered as a half-run
+  // matrix when the screenshot path fails to write.
+  for (const p of pages) {
+    if (!p.name || !/^[a-z0-9][a-z0-9_-]*$/i.test(p.name)) {
+      throw new Error(`shots.json page name unusable as a filename: ${JSON.stringify(p.name)}`);
+    }
+    if (!p.path) throw new Error(`shots.json page '${p.name}' has no path`);
+  }
+  if (new Set(pages.map((p) => p.name)).size !== pages.length) {
+    throw new Error("shots.json page names must be unique — they name the artifacts");
+  }
+
+  // Same honesty rule as web-test: only a host with browsers may run this.
+  if (process.env.FLEET_WEB !== "1") {
+    await postResult({
+      job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,
+      error: `executor ${NAME} has no browsers; pin web-shots with targets.executor`,
+    });
+    log(`refused web-shots ${job.job_id}: no browsers on ${NAME}`);
+    return;
+  }
+
+  // The job may override the manifest's profiles; same forms as web-test.
+  const asked = job.params?.browser ?? manifest.profiles ?? "chromium";
+  const profiles = asked === "all"
+    ? await listWebProjects()
+    : (Array.isArray(asked) ? asked.map(String) : [String(asked)]);
+  if (profiles.length === 0) throw new Error("no profiles: params.browser and shots.json both named none");
+
+  // The accepted truth for this suite, keyed page|profile. Fetched once per
+  // job, not per profile: every profile in one run diffs against the same
+  // accepted set even if someone clicks accept mid-run.
+  const suite = path.relative(specRoot, specDir) || ".";
+  const baselines = new Map<string, string>();
+  {
+    const res = await fetch(`${BASE}/api/visual/baselines?suite=${encodeURIComponent(suite)}`);
+    if (!res.ok) throw new Error(`baselines fetch -> ${res.status}`);
+    const body = (await res.json()) as { baselines: { page: string; profile: string; sha256: string }[] };
+    for (const b of body.baselines) baselines.set(`${b.page}|${b.profile}`, b.sha256);
+  }
+
+  // Same per-profile lease budget as web-test, renewed by a beacon between
+  // profiles: the lease budgets one profile's capture, not the whole matrix.
+  const timeoutS = leaseBudgetS(job);
+
+  const expanded = await expandWebProfiles(profiles);
+
+  // Device-backed captures drive hardware the device-executor also hands work
+  // to, so they hold collector locks for the whole run — a benchmark starting
+  // mid-capture would pollute both jobs' results.
+  const deviceIds = expanded.filter((e) => e.target).map((e) => e.target!.id);
+  const granted = deviceIds.length > 0 ? await acquireLocks(job.job_id, deviceIds) : null;
+
+  let allOk = true;
+  try {
+  for (const [i, entry] of expanded.entries()) {
+    const profile = entry.profile;
+    if (i > 0) await postBeacon(job.job_id, `web:${profile}`, {}).catch(() => {});
+    // A meta-profile that found no hardware here: fail its slot plainly.
+    if (entry.missing) {
+      allOk = false;
+      await postResult({
+        job_id: job.job_id, device_id: `web:${profile}`, iter: 0, ok: false,
+        test: { passed: 0, failed: pages.length, artifacts: [] },
+        error: `${entry.missing}; pin device captures to the executor whose shelf holds them`,
+      });
+      log(`web-shots ${url} (${profile}): ${entry.missing}`);
+      continue;
+    }
+    // Locked hardware is skipped, not failed — the precedent every other
+    // host-driven workload sets.
+    if (entry.target && granted && !granted.has(entry.target.id)) {
+      await postResult({
+        job_id: job.job_id, device_id: `web:${profile}`, iter: 0, ok: true,
+        test: { passed: 0, failed: 0, artifacts: [] },
+        error: "skipped: device locked by another job",
+      });
+      log(`web-shots ${url} (${profile}): skipped (locked)`);
+      continue;
+    }
+    const outDir = mkdtempSync(path.join(os.tmpdir(), `shots-${job.job_id}-${profile.replace(/[^a-zA-Z0-9_-]/g, "_")}-`));
+    const testResults = path.join(outDir, "test-results");
+    const started = Date.now();
+    let detail = "";
+    try {
+      if (entry.target?.kind === "android") {
+        detail = await withTimeout(
+          captureAndroidShots(entry.target.id, manifest, url, outDir), timeoutS, `android capture on ${entry.target.id}`);
+      } else if (entry.target?.kind === "ios-sim") {
+        detail = await withTimeout(
+          captureSimSafariShots(entry.target.id, manifest, url, outDir), timeoutS, `simulator capture on ${entry.target.id}`);
+      } else {
+        await exec(
+          "npx",
+          ["playwright", "test", path.join(specRoot, "_shots"),
+           `--project=${profile}`, "--reporter=json", `--output=${testResults}`],
+          {
+            timeout: timeoutS * 1000,
+            env: {
+              ...process.env, CI: "1", PLAYWRIGHT_BASE_URL: url,
+              SHOTS_MANIFEST: manifestPath, SHOTS_OUT: outDir,
+            },
+            maxBuffer: 64 * 1024 * 1024,
+          },
+        );
+      }
+    } catch (e: unknown) {
+      // A non-zero exit is some pages failing to capture; the per-page rows
+      // below say which. Keep the message for pages with nothing better.
+      detail = ((e as Error).message ?? String(e)).slice(0, 300);
+    }
+
+    // Per-page verdict: captured, and within threshold of the accepted
+    // baseline. The metric is a named field — diff_pct — never laundered
+    // through a slot that means something else.
+    let captured = 0;
+    let diverged = 0;
+    const shas: string[] = [];
+    for (const [pi, p] of pages.entries()) {
+      const file = path.join(outDir, `${p.name}.png`);
+      const capturedOk = existsSync(file);
+      let ok = capturedOk;
+      let diffPct: number | undefined;
+      let note: string | undefined;
+      let sha: string | undefined;
+      let diffSha: string | undefined;
+      const rowArtifacts: string[] = [];
+      if (capturedOk) {
+        sha = await uploadArtifact(file, `${job.job_id}-${profile}-${p.name}.png`);
+        rowArtifacts.push(sha);
+        shas.push(sha);
+        captured++;
+        const baseline = baselines.get(`${p.name}|${profile}`);
+        const threshold = Number(p.threshold_pct ?? manifest.threshold_pct ?? 0.1);
+        if (!baseline) {
+          // Visible, not failing: a new page's first capture is not a
+          // regression, but it stays flagged until someone accepts it.
+          note = "new: no baseline — accept this shot to start diffing";
+        } else if (baseline === sha) {
+          diffPct = 0; // identical bytes; nothing to decode
+        } else {
+          try {
+            const diffFile = path.join(outDir, `${p.name}-diff.png`);
+            const d = await diffShot(file, baseline, diffFile);
+            diffPct = d.diffPct;
+            if (diffPct > threshold) {
+              ok = false;
+              diverged++;
+              note = d.note ?? `${diffPct.toFixed(2)}% of pixels differ (threshold ${threshold}%)`;
+              // The diff image only when it matters: a within-threshold pair
+              // has nothing worth a person's look, and the store is forever.
+              if (d.wroteDiff) {
+                diffSha = await uploadArtifact(diffFile, `${job.job_id}-${profile}-${p.name}-diff.png`);
+                rowArtifacts.push(diffSha);
+              }
+            }
+          } catch (e) {
+            // A baseline the store cannot produce is an operational problem,
+            // not a visual regression — but it must fail, loudly, because a
+            // page that cannot be judged is not a page that passed.
+            ok = false;
+            diverged++;
+            note = `baseline ${baseline.slice(0, 12)}… unreadable: ${(e as Error).message.slice(0, 200)}`;
+          }
+        }
+      } else {
+        note = `no screenshot for page '${p.name}'${detail ? `: ${detail}` : ""}`;
+      }
+      await postResult({
+        job_id: job.job_id, device_id: `web:${profile}`, iter: pi + 1, ok,
+        ...(diffPct !== undefined ? { metrics: { diff_pct: Number(diffPct.toFixed(4)) } } : {}),
+        test: { passed: ok ? 1 : 0, failed: ok ? 0 : 1, artifacts: rowArtifacts },
+        // The structured identity of this cell of the matrix. The dashboard
+        // grid is assembled from these, never parsed out of iter order or the
+        // note text — iter maps to manifest order, and manifests change.
+        shot: {
+          suite, page: p.name, profile,
+          ...(sha ? { sha256: sha } : {}),
+          ...(diffSha ? { diff_sha256: diffSha } : {}),
+        },
+        error: note,
+      });
+    }
+
+    // A capture that missed pages left traces/screenshots explaining why;
+    // upload them onto the profile summary so a red matrix is debuggable.
+    const debris: string[] = [];
+    if (captured < pages.length && existsSync(testResults)) {
+      for (const f of walkFiles(testResults, "")) {
+        debris.push(await uploadArtifact(f.file, `${job.job_id}-${profile}-debris-${f.name.replace(/\//g, "_")}`));
+      }
+    }
+
+    const missed = pages.length - captured;
+    const ok = missed === 0 && diverged === 0;
+    if (!ok) allOk = false;
+    const problems = [
+      ...(missed > 0 ? [`${missed} of ${pages.length} pages not captured`] : []),
+      ...(diverged > 0 ? [`${diverged} page(s) diverged from baseline`] : []),
+    ].join("; ");
+    await postResult({
+      job_id: job.job_id, device_id: `web:${profile}`, iter: 0, ok,
+      test: { passed: pages.length - missed - diverged, failed: missed + diverged, artifacts: [...shas, ...debris] },
+      error: ok ? undefined : problems,
+    });
+    log(
+      `web-shots ${url} (${profile}): ${captured}/${pages.length} pages` +
+      (diverged ? `, ${diverged} diverged` : "") +
+      ` in ${((Date.now() - started) / 1000).toFixed(0)}s`,
+    );
+  }
+  } finally {
+    if (granted) await releaseLocks(job.job_id);
+  }
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
+}
+
+/**
+ * How far the captured pixels drifted from the baseline, as a percent of the
+ * pixel grid, writing a visual diff image when any pixel drifted.
+ *
+ * A size change short-circuits to 100%: pixelmatch cannot compare mismatched
+ * grids, and a page whose full-page height changed has materially changed
+ * however its overlapping pixels look. Antialiasing differences are ignored
+ * (pixelmatch's default) — they are the noise floor of same-host rendering.
+ */
+async function diffShot(
+  currentFile: string, baselineSha: string, diffFile: string,
+): Promise<{ diffPct: number; note?: string; wroteDiff: boolean }> {
+  const baseFile = path.join(mkdtempSync(path.join(os.tmpdir(), "fleet-base-")), "baseline.png");
+  await fetchArtifact(baselineSha, baseFile);
+  const cur = PNG.sync.read(readFileSync(currentFile));
+  const base = PNG.sync.read(readFileSync(baseFile));
+  if (cur.width !== base.width || cur.height !== base.height) {
+    return {
+      diffPct: 100,
+      note: `size changed: ${base.width}x${base.height} -> ${cur.width}x${cur.height}`,
+      wroteDiff: false,
+    };
+  }
+  const diff = new PNG({ width: cur.width, height: cur.height });
+  const mismatched = pixelmatch(base.data, cur.data, diff.data, cur.width, cur.height, { threshold: 0.1 });
+  if (mismatched > 0) writeFileSync(diffFile, PNG.sync.write(diff));
+  return { diffPct: (mismatched / (cur.width * cur.height)) * 100, wroteDiff: mismatched > 0 };
 }
 
 /**
@@ -1255,6 +1768,11 @@ async function main() {
       else if (job.workload === "soak") await runSoak(job);
       else if (job.workload === "drain") await runDrain(job);
       else if (job.workload === "web-test") await runWebTest(job);
+      else if (job.workload === "web-shots") await runWebShots(job);
+      else if (job.workload === "web-audit") await runWebAudit(job);
+      else if (job.workload === "web-unfurl") await runWebUnfurl(job);
+      else if (job.workload === "archive") await runArchive(job);
+      else if (job.workload === "digest") await runDigest(job);
       else {
         await postResult({
           job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: false,

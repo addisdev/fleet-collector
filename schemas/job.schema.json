@@ -8,7 +8,7 @@
     "schema": { "const": 1 },
     "job_id": { "type": "string", "minLength": 1 },
     "workload": {
-      "enum": ["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak"]
+      "enum": ["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak", "web-test", "web-shots", "web-audit", "web-unfurl", "archive", "digest"]
     },
     "executor": {
       "enum": ["device", "host"],
@@ -39,9 +39,9 @@
     "backend": { "enum": ["llama.cpp", "coreml", "litert", "whisper.cpp"] },
     "suite": {
       "type": "object",
-      "description": "ui-test workloads",
+      "description": "ui-test, web-test and web-shots workloads. For playwright, `flows` is a spec directory under web-specs/ and params.browser picks the config project(s): one name, an array run in sequence, or \"all\" for every project in playwright.config.ts. web-shots reads `flows`/shots.json — the manifest of pages to capture and the profiles to capture them under (params.browser overrides the manifest's profiles).",
       "properties": {
-        "kind": { "enum": ["maestro", "xcuitest"] },
+        "kind": { "enum": ["maestro", "xcuitest", "playwright"] },
         "flows": { "type": "string" }
       }
     },
@@ -75,7 +75,10 @@
         "pool": { "type": "string" },
         "device_id": { "type": "string", "description": "pin this job to exactly one device-executor agent" },
         "match": { "type": "string", "description": "descriptor expression, e.g. \"ram_mb >= 4000 && os ~ 'android'\" — fields: model, soc, ram_mb, os, app_ver, device_id, pools; ops == != < <= > >= ~(regex) && || ! ( )" },
-        "exclusive": { "type": "boolean", "description": "host jobs: hold collector device locks on all targets while running, starving device-executor agents until release" }
+        "exclusive": { "type": "boolean", "description": "host jobs: hold collector device locks on all targets while running, starving device-executor agents until release" },
+        "executor": { "type": "string", "description": "which host executor should claim this — a statement about which machine can reach the toolchain or the device, which no descriptor field can express" },
+        "url": { "type": "string", "description": "web-test only: what to point the browser at; no device is involved and none is locked" },
+        "device_kind": { "enum": ["device", "simulator"], "description": "host jobs: narrow selection to real hardware or simulators — a property of how a device is attached, which no descriptor field expresses honestly" }
       }
     },
     "constraints": {

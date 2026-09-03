@@ -25,6 +25,79 @@ attached device) and `ui-test` (`maestro test` per device, JUnit report parsed
 and uploaded back as an artifact). Flows resolve relative to `flows/`
 (`FLEET_FLOWS_DIR` to change); iOS via devicectl/XCUITest is Phase 3.
 
+It also handles `web-test` on hosts started with `FLEET_WEB=1`: Playwright
+suites from `web-specs/` (`FLEET_WEB_SPECS_DIR` to change) against
+`targets.url`, one result row per config project. `params.browser` picks the
+project(s) — one name, an array run in sequence, or `"all"` for everything in
+`playwright.config.ts` (three desktop engines plus emulated-mobile profiles);
+the executor beacons between projects, so the lease budgets one project, not
+the whole matrix.
+
+`web-shots` is the capture half of the visual-regression matrix: it reads
+`web-specs/<site>/shots.json` — pages (`name`, `path`, optional `waitFor`,
+`mask` selectors, `fullPage`, `settle_ms`) plus the profiles to capture under,
+with the same `params.browser` override forms as web-test — screenshots every
+page × profile via `web-specs/_shots/capture.spec.ts`, and uploads the PNGs.
+
+Two profile names are meta-names that expand to real hardware attached to the
+claiming executor, one profile (and one baseline) per device — two phones have
+two screens: `android-device` becomes `android:<serial>` per fleet-owned
+Android device, real Chrome driven via Playwright over adb; `ios-sim-safari`
+becomes `ios-sim:<name>` per booted fleet-owned simulator, Safari via
+`simctl openurl` + screenshot with the status bar pinned to Apple's 9:41
+(no waitFor/mask/fullPage there — `settle_ms` per page stands in, and
+Safari's own chrome is in frame). Device captures hold collector device locks
+for the run. A meta-name that finds no hardware fails its slot rather than
+quietly shrinking the matrix — pin device captures to the executor whose
+shelf holds the devices, as their own job if the browser profiles run
+elsewhere. Real-iPhone Safari has no capture path yet.
+
+Three site-health workloads round out the web suite. `web-audit` crawls
+`targets.url` with a real browser (these are SPAs; fetch would bless a blank
+body), audits every rendered page — titles/descriptions/canonicals and their
+site-wide duplicates, h1s, JSON-LD validity, redirect chains, broken internal
+links with who-links-them, bounded external-link checks, sitemap-vs-crawl
+diff, robots.txt sanity — then re-renders each page under a phone profile for
+the mobile-friendliness pass (viewport meta, content overflow, tiny text and
+tap targets). Config in `web-specs/<site>/audit.json`; error-severity
+findings fail the run, warnings only land in `issues_warn` and the report
+artifact. `web-unfurl` fetches the RAW HTML the way link-preview bots do (no
+JavaScript — og tags injected client-side unfurl as nothing, which is the bug
+this exists to catch), under several bot user-agents, and validates
+og/twitter tags plus the og:image itself; pages in
+`web-specs/<site>/unfurl.json`. `archive` (params.source `"gsc"`) pulls one
+finalized day of Search Console data into the artifact store — Google keeps
+16 months, the fleet keeps forever. Its credential is a Keychain item on the
+executor host (base64 of the service-account JSON; the job spec names the
+account only, per the no-secrets-in-specs rule), and until that item and the
+Google-side service account exist the job fails with instructions.
+
+`archive` also pulls store reviews: `source: "asc"` (App Store Connect,
+ES256 API key) and `source: "play"` (Play Console, the same Google
+service-account grant with the androidpublisher scope). Play returns roughly
+the last seven days of reviews and nothing older, so the review pulls run
+daily — a lazy cadence loses data permanently. Reviews are normalized to one
+shape at pull time and archived as `reviews-<source>-<app>-<date>.json`.
+
+`digest` is the weekly payoff: the host executor gathers the week's review
+artifacts, dedupes by review id (minus the previous digest's watermark), and
+farms the LLM work to the shelf as ordinary `batch` jobs — one pass
+classifying every review against a fixed topic taxonomy, deterministic
+clustering in code between passes, one pass summarizing each cluster — then
+assembles a markdown digest (`review-digest-<date>.md`) with real quotes
+chosen in code, never generated. The job's `model` names the gguf the shelf
+runs; devices are matched with `ram_mb >= 4000` and `require_charging`. Rows
+follow drain's shape: per-page at iter 1..N, per-profile summary at iter 0,
+host row closes the job. Each captured page is diffed (pixelmatch, on the
+executor — baselines are only comparable to pixels rendered by the same host)
+against the baseline the collector holds for (suite, page, profile); a page
+over its `threshold_pct` (per-page or manifest-wide, default 0.1%) fails with
+`metrics.diff_pct` and a diff-image artifact, a page with no baseline passes
+with a "new: no baseline" note until someone accepts a shot via
+`POST /api/visual/baselines/accept` (token-guarded, and the artifact must
+exist in the store). `GET /api/visual/baselines?suite=` lists the accepted
+set. Baseline shas must survive any future artifact GC.
+
 Smoke against a collector you started for the purpose, never the live one — it
 enqueues jobs a real device could claim. Give it its own port and data dir:
 
@@ -102,6 +175,9 @@ exists — the plist invokes it directly to avoid depending on a login `PATH`.
 | `POST /power/:pool/:state` | Fire the pool's smart-plug webhook (`on`/`off`) from `power.json` — see `power.example.json` |
 | `POST /events/:topic` | Publish a pipeline event (JSON payload); returns its id |
 | `GET /events/:topic/poll?after=<id>` | Long-poll the next event past the cursor; 204 on expiry |
+| `GET /api/visual/baselines` | Accepted visual baselines (`?suite=` to filter); the executor diffs web-shots against these |
+| `GET /api/visual/suites` / `GET /api/visual/matrix?suite=` | Suites with visual history, and the review grid: latest run's cells judged pass/diverged/new/missing plus per-cell history — the dashboard's Visual page |
+| `POST /api/visual/baselines/accept` | Set the baseline for (suite, page, profile) to an artifact already in the store (token-guarded) |
 | `GET /dash` | Dashboard SPA (see below) |
 | `GET /dash/legacy` / `GET /dash/legacy/bench` | Server-rendered dashboard / cross-device benchmark comparison |
 | `GET /api/*` | Dashboard read API (see below) |

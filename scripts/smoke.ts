@@ -1115,6 +1115,157 @@ console.log(`smoke against ${BASE}`);
   check("a browser is not enrolled as a device", !ghost, "a web: pseudo-device leaked into the device list");
 }
 
+// 30b. the web-shots workload: the capture half of the visual-regression matrix
+{
+  const SHOTS = `smoke-shots-${run}`;
+  const made = await json("POST", "/jobs", {
+    schema: 1, job_id: SHOTS, workload: "web-shots", executor: "host",
+    suite: { kind: "playwright", flows: "aliquant" },
+    targets: { executor: `web-${run}`, url: "http://127.0.0.1:4173" },
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a web-shots job is accepted", made.status === 201, `status ${made.status} ${JSON.stringify(made.body)}`);
+
+  const claimed = await json("GET", `/executor/next-job?name=web-${run}`);
+  check("a host executor claims the web-shots job", claimed.body?.job_id === SHOTS, JSON.stringify(claimed.body?.job_id));
+
+  // The row shape the executor posts, following drain: per-page rows at
+  // iter 1..N, a per-profile summary at iter 0, and the host row closing it.
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: SHOTS, device_id: "web:chromium", iter: 1, ok: true,
+    test: { passed: 1, failed: 0 },
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: SHOTS, device_id: "web:chromium", iter: 0, ok: true,
+    test: { passed: 1, failed: 0 },
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: SHOTS, device_id: `host:web-${run}`, ok: true, final: true,
+  });
+  const done = await json("GET", `/api/jobs/${SHOTS}`);
+  check("a web-shots job completes", done.body?.status === "done", JSON.stringify(done.body?.status));
+  const rows = (done.body?.results ?? []).filter((r: any) => r.device_id === "web:chromium");
+  check("per-page and per-profile rows coexist", rows.length === 2, `${rows.length} web:chromium rows`);
+}
+
+// 30c. visual baselines: the mutable pointer into the immutable artifact store
+{
+  const bytes = `baseline-shot-${run}`;
+  const up = (await (await fetch(`${BASE}/artifacts`, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream", "x-artifact-name": "home.png" },
+    body: bytes,
+  })).json()) as { sha256: string };
+
+  // A baseline may only point at bytes the store actually holds — a pointer
+  // into nothing would fail every diff forever while looking like truth.
+  const bogus = await json("POST", "/api/visual/baselines/accept", {
+    suite: `smoke-suite-${run}`, page: "home", profile: "chromium",
+    sha256: "0".repeat(64),
+  });
+  check("a baseline for a missing artifact is refused", bogus.status === 404, `status ${bogus.status}`);
+
+  const accepted = await json("POST", "/api/visual/baselines/accept", {
+    suite: `smoke-suite-${run}`, page: "home", profile: "chromium",
+    sha256: up.sha256, job_id: `smoke-shots-${run}`,
+  });
+  check("a baseline is accepted", accepted.status === 201, `status ${accepted.status} ${JSON.stringify(accepted.body)}`);
+
+  const listed = await json("GET", `/api/visual/baselines?suite=smoke-suite-${run}`);
+  const row = (listed.body?.baselines ?? [])[0];
+  check("the baseline lists for its suite", row?.sha256 === up.sha256 && row?.page === "home", JSON.stringify(row));
+  check("accepted_at is unambiguous UTC", /Z$/.test(row?.accepted_at ?? ""), JSON.stringify(row?.accepted_at));
+
+  // Accepting again replaces the pointer — the store is immutable, the
+  // pointer is not, and (suite, page, profile) must never grow duplicates.
+  const up2 = (await (await fetch(`${BASE}/artifacts`, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream", "x-artifact-name": "home2.png" },
+    body: `${bytes}-v2`,
+  })).json()) as { sha256: string };
+  await json("POST", "/api/visual/baselines/accept", {
+    suite: `smoke-suite-${run}`, page: "home", profile: "chromium", sha256: up2.sha256,
+  });
+  const relisted = await json("GET", `/api/visual/baselines?suite=smoke-suite-${run}`);
+  check("re-accepting replaces, not duplicates",
+    relisted.body?.baselines?.length === 1 && relisted.body.baselines[0].sha256 === up2.sha256,
+    JSON.stringify(relisted.body?.baselines));
+
+  // 30d. the review matrix, assembled from the rows' shot blocks
+  const SUITE = `smoke-suite-${run}`;
+  const MJOB = `smoke-matrix-${run}`;
+  await json("POST", "/jobs", {
+    schema: 1, job_id: MJOB, workload: "web-shots", executor: "host",
+    suite: { kind: "playwright", flows: SUITE },
+    targets: { executor: `web-${run}`, url: "http://127.0.0.1:4173" },
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  await json("GET", `/executor/next-job?name=web-${run}`);
+  // One page under two profiles: chromium diverged from the up2 baseline,
+  // webkit captured with no baseline at all.
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: MJOB, device_id: "web:chromium", iter: 1, ok: false,
+    metrics: { diff_pct: 4.2 }, test: { passed: 0, failed: 1 },
+    shot: { suite: SUITE, page: "home", profile: "chromium", sha256: up.sha256, diff_sha256: up2.sha256 },
+    error: "4.20% of pixels differ (threshold 0.1%)",
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: MJOB, device_id: "web:webkit", iter: 1, ok: true,
+    test: { passed: 1, failed: 0 },
+    shot: { suite: SUITE, page: "home", profile: "webkit", sha256: up.sha256 },
+    error: "new: no baseline — accept this shot to start diffing",
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: MJOB, device_id: `host:web-${run}`, ok: false, final: true,
+  });
+
+  const suites = await json("GET", "/api/visual/suites");
+  check("the suite appears in the picker", (suites.body?.suites ?? []).includes(SUITE), JSON.stringify(suites.body?.suites));
+
+  const matrix = await json("GET", `/api/visual/matrix?suite=${SUITE}`);
+  const cells = matrix.body?.cells ?? [];
+  const chromium = cells.find((c: any) => c.profile === "chromium");
+  const webkit = cells.find((c: any) => c.profile === "webkit");
+  check("the matrix reads the latest run", matrix.body?.latest?.job_id === MJOB, JSON.stringify(matrix.body?.latest));
+  check("a cell over threshold with a baseline is diverged",
+    chromium?.status === "diverged" && chromium?.diff_pct === 4.2 && chromium?.baseline_sha256 === up2.sha256,
+    JSON.stringify(chromium));
+  check("a captured cell with no baseline is new, not failed",
+    webkit?.status === "new" && webkit?.baseline_sha256 === null,
+    JSON.stringify(webkit));
+}
+
+// 30e. the site-health and review workloads are accepted and carry named metrics
+for (const [workload, device] of [["web-audit", "web:audit"], ["web-unfurl", "web:unfurl"], ["archive", "web:gsc"], ["digest", "web:digest"]] as const) {
+  const JOB = `smoke-${workload}-${run}`;
+  const made = await json("POST", "/jobs", {
+    schema: 1, job_id: JOB, workload, executor: "host",
+    ...(workload === "archive"
+      ? { params: { source: "gsc", property: "sc-domain:example.com" }, targets: { executor: `web-${run}` } }
+      : workload === "digest"
+        ? { params: { days: 7 }, targets: { executor: `web-${run}` } }
+        : { suite: { kind: "playwright", flows: "aliquant" }, targets: { executor: `web-${run}`, url: "http://127.0.0.1:4173" } }),
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check(`a ${workload} job is accepted`, made.status === 201, `status ${made.status} ${JSON.stringify(made.body)}`);
+  await json("GET", `/executor/next-job?name=web-${run}`);
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: JOB, device_id: device, iter: 0, ok: true,
+    metrics: workload === "archive"
+      ? { clicks: 5, impressions: 100, ctr_pct: 5 }
+      : workload === "digest"
+        ? { reviews_count: 18, clusters: 3, avg_rating: 3.4 }
+        : { issues_error: 0, issues_warn: 2 },
+  });
+  await json("POST", "/results", {
+    schema: 1, kind: "result", job_id: JOB, device_id: `host:web-${run}`, ok: true, final: true,
+  });
+  const done = await json("GET", `/api/jobs/${JOB}`);
+  check(`a ${workload} job completes with its metrics stored`,
+    done.body?.status === "done" && !!(done.body?.results ?? []).find((r: any) => r.device_id === device)?.payload?.metrics,
+    JSON.stringify(done.body?.status));
+}
+
 // 31. build channels: a nightly asks for the latest build, not a pinned hash
 {
   const APP = `smoke-app-${run}`;
@@ -1548,6 +1699,28 @@ console.log(`smoke against ${BASE}`);
     back.body?.spec?.suite?.credentials?.account === "showcase@greenfol.io",
     JSON.stringify(back.body?.spec?.suite?.credentials));
   await json("POST", `/api/jobs/${OK}/cancel`, {});
+
+  // Permissions ride the same channel: declared in the spec, applied by the
+  // executor (simctl privacy grant) before the tests run, so a suite like
+  // jerv's never leaves a location dialog parked on a shared simulator.
+  const PERM = `smoke-perm-${run}`;
+  const perm = await json("POST", "/jobs", {
+    schema: 1, job_id: PERM, workload: "ui-test", executor: "host",
+    app: { name: "jerv-ios", build: "local" },
+    suite: {
+      kind: "xcuitest", project: "/tmp/x.xcodeproj", scheme: "X",
+      permissions: [{ service: "location-always", bundle_id: "com.taylab.jerv" }],
+    },
+    targets: { executor: `never-${run}`, device_kind: "simulator" },
+    lease: { ttl_s: 600, max_attempts: 1 },
+  });
+  check("a job may declare permissions to pre-grant", perm.status === 201, `status ${perm.status}`);
+  const permBack = await json("GET", `/api/jobs/${PERM}`);
+  check("the permission grant survives the round trip",
+    permBack.body?.spec?.suite?.permissions?.[0]?.service === "location-always" &&
+      permBack.body?.spec?.suite?.permissions?.[0]?.bundle_id === "com.taylab.jerv",
+    JSON.stringify(permBack.body?.spec?.suite?.permissions));
+  await json("POST", `/api/jobs/${PERM}/cancel`, {});
 
   // The guard that matters. Refused outright rather than trusting every future
   // caller to remember where secrets belong.

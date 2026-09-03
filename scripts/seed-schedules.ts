@@ -78,7 +78,13 @@ const SCHEDULES: Record<string, Schedule> = {
         "flows": "aliquant"
       },
       "params": {
-        "browser": "chromium"
+        // Every project in playwright.config.ts, resolved by the executor at
+        // run time so a project added to the config joins the nightly without
+        // touching this. Firefox is included on evidence: it wedges on launch
+        // on the DEV MacBook (macOS 27, GraphicsCriticalError) but passed
+        // clean on mac-xcode/RL6P9G7WYT (macOS 26.6.1) on 2026-08-21 — the
+        // breakage is the dev machine's, and this job is pinned to mac-xcode.
+        "browser": "all"
       },
       // Pinned: browsers live on the Mac with Xcode, and an unpinned web job
       // claimed by fleet-host is refused rather than run without a browser.
@@ -86,9 +92,151 @@ const SCHEDULES: Record<string, Schedule> = {
         "executor": "mac-xcode",
         "url": "https://my.aliquant.app"
       },
+      // Per-PROJECT budget, not the whole matrix: the executor beacons between
+      // projects, and each beacon renews the lease.
       "lease": {
         "ttl_s": 900
       }
+    }
+  },
+  "nightly-aliquant-shots": {
+    // After the 04:00 web suite: same host, and a functional failure showing
+    // up before its screenshots keeps the two red flags in a readable order.
+    "cron": "15 4 * * *",
+    "template": {
+      "schema": 1,
+      "workload": "web-shots",
+      "executor": "host",
+      "app": {
+        "name": "aliquant-web",
+        "build": "nightly"
+      },
+      "suite": {
+        "kind": "playwright",
+        "flows": "aliquant"
+      },
+      // Profiles come from web-specs/aliquant/shots.json; pages diff against
+      // the baselines accepted on the dashboard's Visual page. A new page (or
+      // a first run) passes with a "new: no baseline" note until someone
+      // accepts it there — capture failures and threshold-crossing diffs are
+      // what fail this job.
+      "targets": {
+        "executor": "mac-xcode",
+        "url": "https://my.aliquant.app"
+      },
+      "lease": {
+        "ttl_s": 900
+      }
+    }
+  },
+  "nightly-aliquant-unfurl": {
+    // Raw-HTML link previews. No browser involved, but pinned to the same
+    // executor as the rest of the web suite so its results file next to them.
+    "cron": "30 4 * * *",
+    "template": {
+      "schema": 1,
+      "workload": "web-unfurl",
+      "executor": "host",
+      "app": { "name": "aliquant-web", "build": "nightly" },
+      "suite": { "kind": "playwright", "flows": "aliquant" },
+      "targets": { "executor": "mac-xcode", "url": "https://my.aliquant.app" },
+      "lease": { "ttl_s": 600 }
+    }
+  },
+  "nightly-aliquant-audit": {
+    // The crawl (desktop checks + mobile-friendliness pass). Errors fail it;
+    // warnings only show in the report and the issues_warn metric.
+    "cron": "45 4 * * *",
+    "template": {
+      "schema": 1,
+      "workload": "web-audit",
+      "executor": "host",
+      "app": { "name": "aliquant-web", "build": "nightly" },
+      "suite": { "kind": "playwright", "flows": "aliquant" },
+      "targets": { "executor": "mac-xcode", "url": "https://my.aliquant.app" },
+      // The crawl beacons every 10 pages, so the lease budgets a segment,
+      // not the whole site.
+      "lease": { "ttl_s": 900 }
+    }
+  },
+  "daily-gsc-archive": {
+    // Search Console keeps 16 months; this keeps forever. Pulls the day that
+    // finalized three days ago. Until the Keychain item and the Google Cloud
+    // service account exist (see the error the job posts), every run fails
+    // with instructions — seeded disabled like everything else.
+    "cron": "0 6 * * *",
+    "template": {
+      "schema": 1,
+      "workload": "archive",
+      "executor": "host",
+      "params": {
+        "source": "gsc",
+        "property": "sc-domain:aliquant.app",
+        "account": "gsc-service-account"
+      },
+      "targets": { "executor": "mac-xcode" },
+      "lease": { "ttl_s": 600 }
+    }
+  },
+  // --- reviews: daily pulls + weekly digest ---
+  //
+  // The Play API returns roughly the last SEVEN DAYS of reviews and nothing
+  // older, so the pulls are daily: a lazy cadence loses reviews permanently.
+  // One schedule per (store, app); clone a block to add an app. All of these
+  // need a Keychain item on the executor host before they can run — the
+  // job's failure message carries the exact `security add-generic-password`
+  // command — and the ASC blocks additionally need the app's numeric App
+  // Store id filled in below.
+  "daily-reviews-play-greenfolio": {
+    "cron": "20 5 * * *",
+    "template": {
+      "schema": 1, "workload": "archive", "executor": "host",
+      "params": { "source": "play", "app": "greenfolio", "package": "com.taylab.greenfolio" },
+      "targets": { "executor": "mac-xcode" },
+      "lease": { "ttl_s": 600 }
+    }
+  },
+  "daily-reviews-play-jerv": {
+    "cron": "25 5 * * *",
+    "template": {
+      "schema": 1, "workload": "archive", "executor": "host",
+      "params": { "source": "play", "app": "jerv", "package": "com.taylab.jerv" },
+      "targets": { "executor": "mac-xcode" },
+      "lease": { "ttl_s": 600 }
+    }
+  },
+  "daily-reviews-asc-greenfolio": {
+    "cron": "30 5 * * *",
+    "template": {
+      "schema": 1, "workload": "archive", "executor": "host",
+      // app_id is Apple's numeric identifier (App Store Connect -> App
+      // Information -> Apple ID). The placeholder fails with a clear message
+      // rather than silently pulling nothing.
+      "params": { "source": "asc", "app": "greenfolio", "app_id": "SET-ME-numeric-app-id" },
+      "targets": { "executor": "mac-xcode" },
+      "lease": { "ttl_s": 600 }
+    }
+  },
+  "weekly-review-digest": {
+    // Monday morning, after that day's pulls: the week's reviews, classified
+    // and summarized by the shelf's own models, assembled into a markdown
+    // digest artifact. The host executor orchestrates; the LLM work runs as
+    // ordinary batch jobs on charging Android devices with >=4GB RAM.
+    "cron": "0 7 * * 1",
+    "template": {
+      "schema": 1, "workload": "digest", "executor": "host",
+      // Which gguf the shelf should use. Name a model artifact that is
+      // already in the store (Artifacts page lists them); the placeholder
+      // sha fails the batch job with a missing-artifact error, not silence.
+      "model": {
+        "name": "SET-ME-digest-model", "format": "gguf", "quant": "q4_k_m",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "params": { "days": 7 },
+      "targets": { "executor": "mac-xcode" },
+      // The digest beacons every poll while shelf batches run, so the lease
+      // budgets the orchestrator's own gaps, not the whole run.
+      "lease": { "ttl_s": 900 }
     }
   },
   "nightly-synthetic-shelf": {

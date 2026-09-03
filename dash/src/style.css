@@ -455,3 +455,38 @@ pre.cmd {
 /* An inline rename error sits beside the still-open input, so a typed name is
    never thrown away by a failed save. */
 .name-err { font-size: 0.75rem; max-width: 22rem; }
+
+/* Visual-regression grid: one cell per page × profile, colored by verdict.
+   The cell is a button because clicking it is the whole workflow — it opens
+   the side-by-side that justifies (or forbids) an accept. */
+.vr-grid { border-collapse: collapse; width: 100%; }
+.vr-grid th { font-size: 0.72rem; color: var(--ink-dim); text-transform: none; padding: 0.35rem 0.5rem; text-align: left; }
+.vr-grid tbody th { font-weight: 550; color: var(--ink); white-space: nowrap; }
+.vr-grid td { padding: 0.25rem 0.35rem; border-top: 1px solid var(--line); }
+.vr-cell {
+  font: inherit; font-size: 0.78rem; cursor: pointer; width: 100%;
+  display: flex; flex-direction: column; gap: 0.2rem; align-items: flex-start;
+  padding: 0.35rem 0.5rem; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--ink);
+}
+.vr-cell b { font-weight: 600; }
+.vr-cell.pass b { color: var(--ok); }
+.vr-cell.diverged { border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.vr-cell.diverged b { color: var(--bad); }
+.vr-cell.new { border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.vr-cell.new b { color: var(--warn); }
+.vr-cell.missing b { color: var(--ink-faint); }
+.vr-cell.selected { outline: 2px solid var(--accent); }
+.vr-cell:hover { border-color: var(--ink-faint); }
+.vr-history { display: inline-flex; gap: 2px; }
+.vr-history i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.vr-history i.ok { background: var(--ok); }
+.vr-history i.bad { background: var(--bad); }
+.vr-history i.none { background: var(--line); }
+
+/* The side-by-side. Images scale to the column, keep their aspect, and link
+   to the full-size artifact for pixel-peeping. */
+.vr-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0.75rem; margin: 0.75rem 0; }
+.vr-compare figure { margin: 0; }
+.vr-compare figcaption { font-size: 0.72rem; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+.vr-compare img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); }

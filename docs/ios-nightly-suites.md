@@ -49,6 +49,18 @@ makes Jerv *more* testable than GreenFolio once identifiers exist, not less.
 The constraint that follows: **Simulate is disabled mid-ride** (`ControlBar`
 says so), so a flow must set it before starting, never during.
 
+One more constraint, learned the hard way on 2026-08-20: Jerv requests real
+location permission on launch, and the system dialog it triggers outlives the
+job — it was found parked on the shared `fleet-iphone-1`, blocking whatever ran
+next. Jerv's job spec must declare
+
+```json
+"suite": { "permissions": [{ "service": "location-always", "bundle_id": "com.taylab.jerv" }] }
+```
+
+which the executor applies per simulator target (`xcrun simctl privacy grant`)
+before `xcodebuild test`, so the dialog never appears.
+
 ### Aliquant — a finance app that must not touch a real bank
 
 Its own onboarding copy is the specification: *"Connecting an account hands you

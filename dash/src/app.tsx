@@ -15,6 +15,7 @@ import { AlertBanner, Alerts } from "./pages/Alerts.js";
 import { Artifacts } from "./pages/Artifacts.js";
 import { Events } from "./pages/Events.js";
 import { Results } from "./pages/Results.js";
+import { Visual } from "./pages/Visual.js";
 
 import { System } from "./pages/System.js";
 
@@ -23,6 +24,7 @@ const NAV = [
   ["/devices", "Devices"],
   ["/jobs", "Jobs"],
   ["/results", "Results"],
+  ["/visual", "Visual"],
   ["/schedules", "Schedules"],
   ["/artifacts", "Artifacts"],
   ["/events", "Events"],
@@ -79,6 +81,7 @@ function Router() {
   // Before /jobs/:id, or "new" would be read as a job id.
   if (match("/jobs/new", route)) return <Compose />;
   if (match("/results", route)) return <Results />;
+  if (match("/visual", route)) return <Visual />;
   if (match("/artifacts", route)) return <Artifacts />;
   if (match("/events", route)) return <Events />;
   if (match("/schedules", route)) return <Schedules />;

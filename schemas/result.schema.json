@@ -42,7 +42,19 @@
         "p50_ms": { "type": "number", "description": "vision-eval: median per-image inference latency" },
         "p95_ms": { "type": "number", "description": "vision-eval: 95th-percentile per-image inference latency" },
         "images_per_s": { "type": "number", "description": "vision-eval: throughput" },
-        "drain_pct_per_h": { "type": "number", "description": "drain: battery percent consumed per hour" }
+        "drain_pct_per_h": { "type": "number", "description": "drain: battery percent consumed per hour" },
+        "diff_pct": { "type": "number", "description": "web-shots: percent of pixels differing from the accepted baseline (100 when the dimensions changed)" },
+
+        "pages_crawled": { "type": "integer", "description": "web-audit: pages the crawl visited" },
+        "issues_error": { "type": "integer", "description": "web-audit/web-unfurl: error-severity findings (these fail the run)" },
+        "issues_warn": { "type": "integer", "description": "web-audit/web-unfurl: warn-severity findings (recorded, never fail the run)" },
+        "clicks": { "type": "integer", "description": "archive(gsc): total clicks for the archived day" },
+        "impressions": { "type": "integer", "description": "archive(gsc): total impressions for the archived day" },
+        "ctr_pct": { "type": "number", "description": "archive(gsc): click-through rate percent" },
+        "avg_position": { "type": "number", "description": "archive(gsc): impression-weighted average position" },
+        "reviews_count": { "type": "integer", "description": "archive(asc/play) and digest: reviews pulled / digested" },
+        "avg_rating": { "type": "number", "description": "archive(asc/play) and digest: mean star rating over those reviews" },
+        "clusters": { "type": "integer", "description": "digest: topic clusters in the assembled digest" }
       }
     },
     "artifacts": {
@@ -57,6 +69,17 @@
         "passed": { "type": "integer" },
         "failed": { "type": "integer" },
         "artifacts": { "type": "array", "items": { "type": "string" }, "description": "sha256 refs of screenshots/videos/junit uploaded to the artifact store" }
+      }
+    },
+    "shot": {
+      "type": "object",
+      "description": "web-shots per-page rows: which cell of the visual matrix this row judges. The dashboard grid is assembled from these — never from iter order, which maps to manifest order and changes when the manifest does.",
+      "properties": {
+        "suite": { "type": "string" },
+        "page": { "type": "string" },
+        "profile": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "the captured shot; absent when capture failed" },
+        "diff_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "the diff image; present only when the page diverged past threshold" }
       }
     },
     "beacon": {

@@ -81,6 +81,21 @@ CREATE TABLE IF NOT EXISTS artifacts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Visual-regression baselines: for (suite, page, profile), which artifact is
+-- the accepted truth. The artifact store is content-addressed and immutable;
+-- this table is the mutable pointer into it. Accepting a new baseline
+-- overwrites the row — history lives in the results that captured each shot,
+-- not here. Rows referenced here must survive any future artifact GC.
+CREATE TABLE IF NOT EXISTS baselines (
+  suite       TEXT NOT NULL,          -- web-specs/<suite>, as the job's suite.flows names it
+  page        TEXT NOT NULL,          -- shots.json page name
+  profile     TEXT NOT NULL,          -- playwright.config.ts project name
+  sha256      TEXT NOT NULL,
+  accepted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  accepted_from_job TEXT,             -- the web-shots job the accepted shot came from
+  PRIMARY KEY (suite, page, profile)
+);
+
 CREATE TABLE IF NOT EXISTS schedules (
   id         TEXT PRIMARY KEY,
   cron       TEXT NOT NULL,           -- 5-field cron expression

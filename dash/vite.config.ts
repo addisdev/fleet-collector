@@ -25,6 +25,13 @@ export default defineConfig({
         target: process.env.FLEET_URL ?? "http://127.0.0.1:8788",
         changeOrigin: true,
       },
+      // The Visual page renders baseline/current/diff images straight from the
+      // artifact store; without this, dev serves the SPA shell where a PNG
+      // should be.
+      "/artifacts": {
+        target: process.env.FLEET_URL ?? "http://127.0.0.1:8788",
+        changeOrigin: true,
+      },
     },
   },
 });

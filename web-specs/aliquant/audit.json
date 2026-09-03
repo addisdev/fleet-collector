@@ -1,0 +1,7 @@
+{
+  "max_pages": 200,
+  "external_links": "check",
+  "allow_external": ["cloudflareinsights\\.com"],
+  "mobile": true,
+  "indexable": false
+}

@@ -92,9 +92,19 @@ type JobSpec = {
   [k: string]: unknown;
 };
 
-// web-test is host-executed like ui-test, but its target is a URL rather than
-// a device: no phone is involved and none is locked.
-const WORKLOADS = new Set(["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak", "web-test"]);
+// web-test and web-shots are host-executed like ui-test, but their target is a
+// URL rather than a device: no phone is involved and none is locked. web-test
+// runs Playwright suites; web-shots captures the screenshot matrix the
+// visual-regression pipeline diffs.
+// web-audit crawls and audits a site (SEO, structure, mobile-friendliness),
+// web-unfurl checks the raw-HTML link previews bots see, archive pulls an
+// external API's data (Search Console, App Store / Play reviews) into the
+// artifact store, and digest turns the week's archived reviews into a
+// summary by farming batch jobs to the shelf's on-device models.
+const WORKLOADS = new Set([
+  "benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak",
+  "web-test", "web-shots", "web-audit", "web-unfurl", "archive", "digest",
+]);
 
 function touchDevice(deviceId: string) {
   db.prepare("UPDATE devices SET last_seen = datetime('now') WHERE device_id = ?").run(deviceId);

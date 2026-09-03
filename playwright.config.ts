@@ -26,5 +26,10 @@ export default defineConfig({
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "webkit", use: { ...devices["Desktop Safari"] } },
     { name: "firefox", use: { ...devices["Desktop Firefox"] } },
+    // Emulated mobile: real viewport, touch and UA on the desktop engines the
+    // host already has — not real phones. Real-device capture is a later phase;
+    // these exist so the matrix covers mobile layouts tonight, not eventually.
+    { name: "mobile-chrome", use: { ...devices["Pixel 7"] } },
+    { name: "mobile-safari", use: { ...devices["iPhone 14"] } },
   ],
 });

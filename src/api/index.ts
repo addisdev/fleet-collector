@@ -16,6 +16,7 @@ import { registerOverview } from "./overview.js";
 import { registerResults } from "./results.js";
 import { registerStream } from "./stream.js";
 import { registerSystem } from "./system.js";
+import { registerVisual } from "./visual.js";
 
 type Announce = (event: { type: string; [k: string]: unknown }) => void;
 type MatchingDevices = (
@@ -30,6 +31,7 @@ export function registerApi(app: FastifyInstance, announce: Announce, matchingDe
   registerJobs(app);
   registerResults(app);
   registerSystem(app);
+  registerVisual(app);
   registerStream(app);
   registerMutations(app, announce, matchingDevices);
 
