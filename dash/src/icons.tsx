@@ -6,7 +6,7 @@
 // as text, the icon only makes them faster to scan.
 import type { ComponentChildren } from "preact";
 
-const PATHS: Record<string, ComponentChildren> = {
+const PATHS = {
   phone: (
     <>
       <rect x="4.25" y="1.75" width="7.5" height="12.5" rx="1.75" />
@@ -91,7 +91,7 @@ const PATHS: Record<string, ComponentChildren> = {
       <path d="M1.75 8h12.5M8 1.75c2 2 2 10.5 0 12.5M8 1.75c-2 2-2 10.5 0 12.5" />
     </>
   ),
-};
+} satisfies Record<string, ComponentChildren>;
 
 export type IconName = keyof typeof PATHS;
 
@@ -121,10 +121,10 @@ export function Icon({ name, size = 14, title }: { name: IconName; size?: number
 
 /** The Fleet Runner glyph: the pulse from the launcher mark, on its ink
  *  square. This is the under-24px form of the mark, the same drawing as
- *  public/favicon.svg. */
+ *  public/favicon.svg. Decorative: the wordmark beside it says the name. */
 export function Glyph({ size = 20 }: { size?: number }) {
   return (
-    <svg class="glyph" width={size} height={size} viewBox="0 0 16 16" role="img" aria-label="Fleet Runner">
+    <svg class="glyph" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
       <rect width="16" height="16" rx="3.5" fill="#1c2025" />
       <path
         d="M3 8.5h2.2l1.4-4 2.4 8 1.5-4H13"
@@ -138,8 +138,8 @@ export function Glyph({ size = 20 }: { size?: number }) {
   );
 }
 
-/** Which icon a workload gets. Workloads without one (archive, digest) show
- *  their name alone; a wrong icon would be worse than none. */
+/** Which icon a workload gets. Workloads without one (pipeline, archive,
+ *  digest) show their name alone; a wrong icon would be worse than none. */
 const WORKLOAD_ICON: Record<string, IconName> = {
   install: "install",
   "ui-test": "uitest",
