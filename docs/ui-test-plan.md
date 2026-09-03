@@ -114,7 +114,7 @@ uncertainty first.
 | Phase | State |
 |---|---|
 | U0 — route jobs to an executor | done, merged |
-| U1 — the iOS executor | done, moved to RL6P9G7WYT — see §3.2 |
+| U1 — the iOS executor | done, moved to `runner-host` — see §3.2 |
 | U2 — Android suites | apps now installed and smoke-tested; real journeys still to write |
 | U3 — iOS suites | **greenfolio green on a physical iPhone**, signing in |
 | U4 — web-test workload | done, `aliquant-web` green against the live deployment |
@@ -137,7 +137,7 @@ hardware found a year-old latent bug in the test that exists to find bugs.**
 
 ### 3.2 The iOS executor moved
 
-`mac-xcode` now runs on **RL6P9G7WYT** (`runner-host`), not the primary
+`mac-xcode` now runs on the **runner host**, not the primary
 workstation, with the iPhone cabled there. Standing it up is written down in
 [`ios-executor-host.md`](ios-executor-host.md); three things from that are
 worth repeating here because each cost real time:

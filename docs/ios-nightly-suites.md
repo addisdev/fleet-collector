@@ -136,7 +136,7 @@ Aliquant:
 
 Three gaps, all small, all real:
 
-**Source has to reach the executor host.** greenfolio-ios is on RL6P9G7WYT
+**Source has to reach the executor host.** greenfolio-ios is on the runner host
 because I rsynced it by hand. That does not scale to three apps and does not
 survive a rebuild. `ui-test-plan.md` §4.2 already says suites should be
 published with the build; until that exists, a `git clone` per app on the host

@@ -82,7 +82,7 @@ const SCHEDULES: Record<string, Schedule> = {
         // run time so a project added to the config joins the nightly without
         // touching this. Firefox is included on evidence: it wedges on launch
         // on the DEV MacBook (macOS 27, GraphicsCriticalError) but passed
-        // clean on mac-xcode/RL6P9G7WYT (macOS 26.6.1) on 2026-08-21 — the
+        // clean on mac-xcode/runner-host (macOS 26.6.1) on 2026-08-21 — the
         // breakage is the dev machine's, and this job is pinned to mac-xcode.
         "browser": "all"
       },
