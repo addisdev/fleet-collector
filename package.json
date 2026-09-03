@@ -8,6 +8,8 @@
   },
   "description": "Fleet Runner collector: device registry, job queue, artifact store, results DB, dashboard.",
   "scripts": {
+    "test": "tsx scripts/test.ts",
+    "typecheck": "tsc --noEmit",
     "start": "tsx src/server.ts",
     "dev": "tsx watch src/server.ts",
     "executor": "tsx src/executor.ts",

@@ -1,0 +1,43 @@
+name: CI
+
+# The collector needs no hardware to be tested. `npm test` starts a throwaway
+# collector on a spare port with a temporary database and drives it through
+# every endpoint, so CI runs the same suite a developer does and neither one
+# can touch a real fleet's history.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Both versions report, so a failure on one does not hide the other.
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            dash/package-lock.json
+
+      - run: npm ci
+
+      # The dashboard has its own package.json, so `npm test` skips building it
+      # when its modules are absent rather than failing on a missing binary.
+      # This step is what makes that build actually happen here.
+      - name: Install dashboard dependencies
+        run: npm --prefix dash ci
+
+      # Playwright is a dependency but its browsers are not downloaded: nothing
+      # in this suite drives a browser. The web-* workloads that do are run by
+      # an executor on real hardware, not here.
+      - run: npm test
