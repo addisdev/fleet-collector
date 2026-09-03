@@ -68,8 +68,14 @@ export async function keychainPassword(
       ? { ok: true, password: pw }
       : { ok: false, reason: "missing", detail: "the keychain item is empty" };
   } catch (e) {
-    const err = e as { stderr?: string; message?: string };
+    const err = e as { code?: string; stderr?: string; message?: string };
     const text = `${err.stderr ?? ""} ${err.message ?? ""}`;
+    // No `security` binary at all means this is not a Mac. That is a miss,
+    // not a denial: "unlock your keychain" is the wrong advice on a Linux CI
+    // runner, and the honest detail is that there is no keychain to unlock.
+    if (err.code === "ENOENT" || /ENOENT/.test(text)) {
+      return { ok: false, reason: "missing", detail: "no `security` command on this host (macOS Keychain only)" };
+    }
     // "The specified item could not be found in the keychain." is the miss;
     // anything else -- a locked keychain, a denied ACL -- is a read failure.
     const missing = /could not be found/i.test(text);
