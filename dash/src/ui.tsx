@@ -1,6 +1,7 @@
 // Shared presentational bits and the formatters every page needs.
 import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
+import { Icon, type IconName } from "./icons.js";
 import { BASE, navigate, useRoute } from "./router.js";
 
 export function Link({
@@ -47,9 +48,19 @@ export function Stat({ label, value, tone }: { label: string; value: ComponentCh
   );
 }
 
-export const Pill = ({ kind, children }: { kind: string; children?: ComponentChildren }) => (
-  <span class={`pill ${kind}`}>{children ?? kind}</span>
-);
+/* Device states get an icon; job states do not. Online/stale/offline are
+   read across a whole shelf at a glance, job status is read one row at a time. */
+const PILL_ICON: Partial<Record<string, IconName>> = { online: "online", stale: "stale", offline: "offline" };
+
+export const Pill = ({ kind, children }: { kind: string; children?: ComponentChildren }) => {
+  const icon = PILL_ICON[kind];
+  return (
+    <span class={`pill ${kind}`}>
+      {icon && <Icon name={icon} size={11} />}
+      {children ?? kind}
+    </span>
+  );
+};
 
 export function Loading({ what }: { what: string }) {
   return <p class="skeleton">Loading {what}…</p>;

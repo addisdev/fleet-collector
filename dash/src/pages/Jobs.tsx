@@ -1,5 +1,6 @@
 import { useApi, type Job, type JobList } from "../api.js";
 import { useQuery } from "../router.js";
+import { Workload } from "../icons.js";
 import { useDeviceNames } from "../names.js";
 import { DeviceName, Filters, Link, Loaded, Pager, Panel, Pill, Search, Select, agoFrom, duration } from "../ui.js";
 
@@ -49,7 +50,7 @@ export function JobRows({ jobs }: { jobs: Job[] }) {
               </Link>
             </td>
             <td>
-              {j.workload} <span class="faint">{j.executor}</span>
+              <Workload name={j.workload} /> <span class="faint">{j.executor}</span>
             </td>
             <td>
               <Pill kind={j.status} />

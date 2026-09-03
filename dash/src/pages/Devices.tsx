@@ -1,6 +1,7 @@
 // The shelf. What is online, what it is doing, and how to get to it.
 import { useState } from "preact/hooks";
 import { useApi, type Device, type DeviceList } from "../api.js";
+import { Icon } from "../icons.js";
 import { mutate, useMutation } from "../mutate.js";
 import { refreshNames } from "../names.js";
 import { useQuery } from "../router.js";
@@ -82,15 +83,20 @@ export function Battery({ pct, charging }: { pct: number | null; charging: boole
   if (pct < 0) return <span class="faint" title="Device reports no battery telemetry">n/a</span>;
   const tone = pct < 15 && !charging ? "bad" : pct < 30 && !charging ? "warn" : "";
   return (
-    <span class={tone} title={charging ? "charging" : "on battery"}>
-      {pct}%{charging ? " ⚡" : ""}
+    <span class={`with-icon ${tone}`} title={charging ? "charging" : "on battery"}>
+      {pct}%{charging && <Icon name="charging" title="charging" />}
     </span>
   );
 }
 
 export function Thermal({ state }: { state: string | null }) {
   if (!state) return <span class="faint">—</span>;
-  return <span class={`th-text th-${state}`}>{state}</span>;
+  return (
+    <span class={`with-icon th-text th-${state}`}>
+      <Icon name="thermal" />
+      {state}
+    </span>
+  );
 }
 
 export function Devices() {
@@ -166,7 +172,12 @@ export function Devices() {
                               open
                             </Link>{" "}
                             <Pill kind={dev.status} />
-                            {dev.simulator && <span class="faint"> simulator</span>}
+                            {dev.simulator && (
+                              <span class="faint with-icon">
+                                <Icon name="simulator" />
+                                simulator
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td>

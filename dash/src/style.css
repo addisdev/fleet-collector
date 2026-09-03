@@ -65,8 +65,16 @@ code, .mono { font-family: var(--mono); font-size: 0.86em; }
   margin-bottom: 1.25rem;
 }
 
-.brand { font-weight: 640; letter-spacing: -0.01em; white-space: nowrap; }
-.brand span { color: var(--ink-faint); font-weight: 400; }
+.brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 640; letter-spacing: -0.01em; white-space: nowrap; }
+.brand span span { color: var(--ink-faint); font-weight: 400; }
+.glyph { flex: none; display: block; }
+
+/* --- icons --- */
+
+/* An icon always sits beside its word. .with-icon keeps the two on one line
+   with a fixed gap, whatever the surrounding text does. */
+.icon { flex: none; vertical-align: -0.15em; }
+.with-icon { display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
 
 .nav { display: flex; gap: 0.15rem; overflow-x: auto; scrollbar-width: none; flex: 1; }
 .nav::-webkit-scrollbar { display: none; }
@@ -136,7 +144,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* --- pills --- */
 
 .pill {
-  display: inline-block; padding: 0.05rem 0.45rem; border-radius: 999px;
+  display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.05rem 0.45rem; border-radius: 999px;
   font-size: 0.72rem; font-weight: 550; border: 1px solid transparent; white-space: nowrap;
 }
 .pill.queued  { color: var(--ink-dim); border-color: var(--line); }
@@ -371,7 +379,7 @@ kbd {
      tabs slide under the thumb. */
   .topbar { gap: 0.5rem; padding: 0.55rem 0; }
   .brand { font-size: 0.9rem; }
-  .brand span { display: none; }
+  .brand span span { display: none; }
   /* flex-basis, not width: the base rule sets `flex: 1` (basis 0%), and for a
      flex item basis beats width — so `width: 100%` alone never wraps the row. */
   .nav { order: 3; flex: 1 0 100%; margin: 0 -0.75rem; padding: 0 0.75rem; }
