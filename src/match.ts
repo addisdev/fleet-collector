@@ -2,7 +2,8 @@
 //   ram_mb >= 4000 && os ~ 'android' || model == 'SM-X930'
 // Operators: == != < <= > >= ~ (regex/contains, case-insensitive) && || ! ( )
 // Identifiers resolve to descriptor fields (model, soc, ram_mb, os, app_ver)
-// plus pools ("pools ~ 'ml-capable'"). Never uses eval.
+// plus pools ("pools ~ 'ml-capable'") and capabilities
+// ("capabilities ~ 'build:xcode'"). Never uses eval.
 
 type Tok = { t: "num"; v: number } | { t: "str"; v: string } | { t: "id"; v: string } | { t: "op"; v: string };
 
@@ -33,14 +34,20 @@ function lex(src: string): Tok[] {
   return out;
 }
 
-export type Descriptor = Record<string, unknown> & { pools?: string[] };
+export type Descriptor = Record<string, unknown> & { pools?: string[]; capabilities?: string[] };
 
 export function evalMatch(expr: string, d: Descriptor): boolean {
   const toks = lex(expr);
   let p = 0;
   const peek = () => toks[p];
   const next = () => toks[p++];
-  const value = (id: string): unknown => (id === "pools" ? (d.pools ?? []).join(",") : d[id]);
+  // Both list fields are joined to a string so `~` can substring-match a single
+  // entry ("capabilities ~ 'build:xcode'"); every other operator compares the
+  // whole joined value, which is what == on a list should mean anyway.
+  const value = (id: string): unknown =>
+    id === "pools" ? (d.pools ?? []).join(",")
+    : id === "capabilities" ? (d.capabilities ?? []).join(",")
+    : d[id];
 
   function primary(): unknown {
     const t = next();

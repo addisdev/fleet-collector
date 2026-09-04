@@ -1,13 +1,14 @@
 // GET /api/devices, /api/devices/:id, /api/devices/:id/beacons
 import type { FastifyInstance } from "fastify";
 import { db } from "../db.js";
-import { AGE, beaconFields, deviceStatus, effectivePools, iso, isSimulator, paging, parse } from "./shared.js";
+import { AGE, beaconFields, deviceCapabilities, deviceStatus, effectivePools, iso, isSimulator, paging, parse } from "./shared.js";
 
 type DeviceRow = {
   device_id: string;
   descriptor: string;
   pools: string;
   pools_override: string | null;
+  capabilities: string | null;
   name: string | null;
   notes: string | null;
   last_seen: string;
@@ -15,7 +16,7 @@ type DeviceRow = {
   age_s: number | null;
 };
 
-const DEVICE_SELECT = `SELECT device_id, descriptor, pools, pools_override, name, notes,
+const DEVICE_SELECT = `SELECT device_id, descriptor, pools, pools_override, capabilities, name, notes,
                               last_seen, last_beacon, ${AGE("last_seen")} AS age_s
                        FROM devices`;
 
@@ -32,6 +33,9 @@ function shapeDevice(d: DeviceRow) {
     pools: effectivePools(d),
     pools_reported: parse<string[]>(d.pools, []),
     pools_override: parse<string[] | null>(d.pools_override, null),
+    // null, not [], for an agent that predates capabilities: the dashboard says
+    // "all" for that case rather than showing it as able to run nothing.
+    capabilities: deviceCapabilities(d),
     platform: /ios|iphone|ipad/i.test(String(descriptor.os ?? "")) ? "ios" : "android",
     simulator: isSimulator(descriptor, d.device_id),
     status: deviceStatus(d.age_s),

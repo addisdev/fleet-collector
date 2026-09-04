@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "metrics": [
+    "avg_position",
+    "avg_rating",
+    "battery_end_pct",
+    "battery_start_pct",
+    "clicks",
+    "clusters",
+    "ctr_pct",
+    "decode_tok_s",
+    "diff_pct",
+    "drain_pct_per_h",
+    "images_per_s",
+    "impressions",
+    "issues_error",
+    "issues_warn",
+    "load_ms",
+    "mem_method",
+    "p50_ms",
+    "p95_ms",
+    "pages_crawled",
+    "peak_mem_mb",
+    "prefill_tok_s",
+    "reviews_count",
+    "thermal",
+    "top1_pct",
+    "top5_pct",
+    "ttft_ms"
+  ]
+}

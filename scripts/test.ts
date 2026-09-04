@@ -121,7 +121,14 @@ step("every workload has an icon");
   }
 }
 
-// --- 4. the collector, on its own data ----------------------------------
+// --- 4. metric names ----------------------------------------------------
+// The schema is the contract for a name that three codebases write and one
+// reads. Nothing enforced it until now, and the last drift cost the plant-ID
+// eval's numbers their queryability.
+step("metric names match the schema");
+if (!(await run(process.execPath, [TSX, "scripts/check-metrics.ts"]))) failed = true;
+
+// --- 5. the collector, on its own data ----------------------------------
 step("smoke (against a throwaway collector)");
 const dir = await mkdtemp(path.join(tmpdir(), "fleet-test-"));
 const port = await freePort();

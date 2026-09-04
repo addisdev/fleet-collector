@@ -108,6 +108,8 @@ export type Device = {
   descriptor: Record<string, unknown>;
   /** Effective pools: the override when set, otherwise what the runner reports. */
   pools: string[];
+  /** null = an agent that predates capability routing; it is offered everything. */
+  capabilities: string[] | null;
   pools_reported: string[];
   pools_override: string[] | null;
   platform: "ios" | "android";

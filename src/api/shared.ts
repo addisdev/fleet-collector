@@ -31,6 +31,34 @@ export function effectivePools(row: { pools: string; pools_override?: string | n
   return Array.isArray(override) ? override : parse<string[]>(row.pools, []);
 }
 
+/**
+ * What an agent says it can run. NULL is not an empty list: it is an agent that
+ * registered before capabilities existed, and it must keep being offered work
+ * or a collector upgrade would silently idle the whole shelf. Callers get null
+ * for that case and are expected to treat it as "no opinion", not "nothing".
+ */
+export function deviceCapabilities(row: { capabilities?: string | null }): string[] | null {
+  const parsed = parse<string[] | null>(row.capabilities ?? null, null);
+  return Array.isArray(parsed) ? parsed : null;
+}
+
+/**
+ * The capability a job needs. A job that names a backend can be satisfied two
+ * ways: by an agent that declares the exact pairing ("batch:litert"), or by one
+ * that declares the workload outright ("batch") and so handles every backend it
+ * was built with. Being permissive here is deliberate — the narrow form exists
+ * to let a future agent advertise one backend without claiming the workload.
+ */
+export function capabilityMatches(
+  declared: string[] | null,
+  workload: string,
+  backend?: string | null,
+): boolean {
+  if (declared === null) return true;
+  if (declared.includes(workload)) return true;
+  return !!backend && declared.includes(`${workload}:${backend}`);
+}
+
 // Devices beacon every 60 s. One missed beacon is normal (the runner may be
 // mid-inference); five missed beacons means something is wrong; a quarter hour
 // of silence means the device is off the shelf, asleep, or dead.

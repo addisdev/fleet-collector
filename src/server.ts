@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { createServer } from "node:net";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, statSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { rename, unlink } from "node:fs/promises";
@@ -11,6 +12,7 @@ import { cronMatches, isValidCron, minuteKey } from "./cron.js";
 import { evalMatch, isValidMatch } from "./match.js";
 import {
   ARTIFACT_DIR,
+  BIND,
   DATA_DIR,
   GITHUB_API,
   GITHUB_STATUS_ARMED,
@@ -24,7 +26,7 @@ import {
 import { evaluate, expireSnoozes, notify, reconcile } from "./alerts.js";
 import { requireToken } from "./api/guard.js";
 import { invalidateOverview, publish, registerApi } from "./api/index.js";
-import { effectivePools } from "./api/shared.js";
+import { capabilityMatches, deviceCapabilities, effectivePools } from "./api/shared.js";
 import { registerDashStatic } from "./dash-static.js";
 
 mkdirSync(ARTIFACT_DIR, { recursive: true });
@@ -62,6 +64,10 @@ type JobSpec = {
   workload: string;
   executor: "device" | "host";
   fanout?: boolean;
+  // Named here rather than left to the index signature because capability
+  // routing reads it: an agent may declare a workload outright or only one
+  // backend of it ("batch:litert").
+  backend?: string;
   // `sha256: "latest"` is resolved at enqueue time to the newest build uploaded
   // under this app name -- see resolveLatestBuild.
   app?: { name?: string; build?: string; sha256?: string; platform?: string };
@@ -113,20 +119,27 @@ function touchDevice(deviceId: string) {
 /** Devices a `targets` clause selects. Shared by fan-out and by the composer's
  *  "N devices match" preview, so the preview cannot disagree with what fan-out
  *  will actually do. */
-export function matchingDevices(pool?: string, match?: string) {
+export function matchingDevices(pool?: string, match?: string, workload?: string, backend?: string | null) {
   return (
-    db.prepare("SELECT device_id, pools, pools_override, descriptor FROM devices").all() as {
+    db.prepare("SELECT device_id, pools, pools_override, descriptor, capabilities FROM devices").all() as {
       device_id: string;
       pools: string;
       pools_override: string | null;
       descriptor: string;
+      capabilities: string | null;
     }[]
   ).filter((d) => {
     const pools = effectivePools(d);
+    const capabilities = deviceCapabilities(d);
     if (pool && !pools.includes(pool)) return false;
+    // Checked before the expression, so a match expression can narrow the set
+    // but never widen an agent past what its own code can run.
+    if (workload && !capabilityMatches(capabilities, workload, backend)) return false;
     if (match) {
       try {
-        return evalMatch(match, { ...JSON.parse(d.descriptor), device_id: d.device_id, pools });
+        return evalMatch(match, {
+          ...JSON.parse(d.descriptor), device_id: d.device_id, pools, capabilities: capabilities ?? [],
+        });
       } catch {
         return false;
       }
@@ -135,9 +148,33 @@ export function matchingDevices(pool?: string, match?: string) {
   });
 }
 
+/**
+ * Is there any agent on the fleet that could run this workload? The built-in
+ * set is always serviceable — those workloads live in the executor, which does
+ * not register as a device. Anything else has to be claimed by an agent that
+ * says it can run it, which is what stops a typo'd workload sitting queued
+ * forever with no explanation.
+ */
+function workloadServiceableBy(workload: string, backend?: string | null): boolean {
+  if (WORKLOADS.has(workload)) return true;
+  return (
+    db.prepare("SELECT capabilities FROM devices").all() as { capabilities: string | null }[]
+  ).some((d) => {
+    const declared = deviceCapabilities(d);
+    // A legacy agent's null means "no opinion", which cannot be read as a claim
+    // to run a workload that did not exist when it registered.
+    return declared !== null && capabilityMatches(declared, workload, backend);
+  });
+}
+
 // Atomically claim the oldest queued job this claimant is eligible for, and
 // start its lease clock.
-const claimTx = db.transaction((executor: string, claimant: string, devicePools: string[]): JobSpec | null => {
+const claimTx = db.transaction((
+  executor: string,
+  claimant: string,
+  devicePools: string[],
+  deviceCaps: string[] | null = null,
+): JobSpec | null => {
   let descriptor: Record<string, unknown> = {};
   if (executor === "device") {
     // A host-executor job holding this device (exclusive ui-test, drain…)
@@ -148,7 +185,10 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
       | { descriptor: string } | undefined;
     // targets.match expressions can read `pools`, so they see the effective set
     // the caller resolved, not the runner's raw report.
-    descriptor = { ...(dev ? JSON.parse(dev.descriptor) : {}), device_id: claimant, pools: devicePools };
+    descriptor = {
+      ...(dev ? JSON.parse(dev.descriptor) : {}),
+      device_id: claimant, pools: devicePools, capabilities: deviceCaps ?? [],
+    };
   }
   // Priority first, then age. A job promoted from the dashboard jumps the queue
   // without anyone falsifying its created_at.
@@ -166,6 +206,10 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
       if (spec.targets?.device_id && spec.targets.device_id !== claimant) continue;
       const pool = spec.targets?.pool;
       if (pool && !devicePools.includes(pool)) continue;
+      // An agent is never handed a workload it did not say it could run. This
+      // sits above targets.match on purpose: an expression narrows the set of
+      // eligible agents, it does not grant one a workload its code lacks.
+      if (!capabilityMatches(deviceCaps, spec.workload, spec.backend ?? null)) continue;
       // targets.match: descriptor expression ("ram_mb >= 4000 && os ~ 'android'").
       if (spec.targets?.match) {
         try { if (!evalMatch(spec.targets.match, descriptor)) continue; } catch { continue; }
@@ -187,9 +231,14 @@ const claimTx = db.transaction((executor: string, claimant: string, devicePools:
   return null;
 });
 
-async function longPollClaim(executor: "device" | "host", claimant: string, pools: string[]) {
+async function longPollClaim(
+  executor: "device" | "host",
+  claimant: string,
+  pools: string[],
+  capabilities: string[] | null = null,
+) {
   for (let i = 0; i < LONG_POLL_S; i++) {
-    const spec = claimTx(executor, claimant, pools);
+    const spec = claimTx(executor, claimant, pools, capabilities);
     if (spec) {
       // Announced here rather than inside claimTx: the transaction has
       // committed by the time it returns.
@@ -258,37 +307,52 @@ function sweepLeases() {
 // --- devices ---
 
 app.post("/devices/register", async (req, reply) => {
-  const b = req.body as { device_id?: string; descriptor?: object; pools?: string[] };
+  const b = req.body as {
+    device_id?: string; descriptor?: object; pools?: string[]; capabilities?: string[];
+  };
   if (!b?.device_id) return reply.code(400).send({ error: "device_id required" });
+  if (b.capabilities !== undefined &&
+      (!Array.isArray(b.capabilities) || b.capabilities.some((c) => typeof c !== "string")))
+    return reply.code(400).send({ error: "capabilities must be an array of strings" });
+  // An agent that sends no capabilities keeps whatever it declared last, rather
+  // than having them erased: an older build of the same runner re-registering
+  // during a rollback would otherwise widen itself back to everything.
+  const capabilities = b.capabilities === undefined ? null : JSON.stringify(b.capabilities);
   db.prepare(
-    `INSERT INTO devices (device_id, descriptor, pools, last_seen)
-     VALUES (?, ?, ?, datetime('now'))
+    `INSERT INTO devices (device_id, descriptor, pools, capabilities, last_seen)
+     VALUES (?, ?, ?, ?, datetime('now'))
      ON CONFLICT(device_id) DO UPDATE SET
-       descriptor = excluded.descriptor, pools = excluded.pools, last_seen = excluded.last_seen`,
-  ).run(b.device_id, JSON.stringify(b.descriptor ?? {}), JSON.stringify(b.pools ?? []));
-  announce({ type: "device", device_id: b.device_id, event: "register", pools: b.pools ?? [] });
+       descriptor = excluded.descriptor, pools = excluded.pools, last_seen = excluded.last_seen,
+       capabilities = COALESCE(excluded.capabilities, devices.capabilities)`,
+  ).run(b.device_id, JSON.stringify(b.descriptor ?? {}), JSON.stringify(b.pools ?? []), capabilities);
+  announce({
+    type: "device", device_id: b.device_id, event: "register",
+    pools: b.pools ?? [], capabilities: b.capabilities ?? null,
+  });
   return { ok: true };
 });
 
 app.get("/devices", async () =>
   (db.prepare("SELECT * FROM devices ORDER BY last_seen DESC").all() as
-    { device_id: string; descriptor: string; pools: string; last_seen: string; last_beacon: string | null }[])
+    { device_id: string; descriptor: string; pools: string; last_seen: string;
+      last_beacon: string | null; capabilities: string | null }[])
     .map((d) => ({
       device_id: d.device_id,
       descriptor: JSON.parse(d.descriptor),
       pools: JSON.parse(d.pools),
+      capabilities: deviceCapabilities(d),
       last_seen: d.last_seen,
       last_beacon: d.last_beacon ? JSON.parse(d.last_beacon) : null,
     })));
 
 app.get("/devices/:id/next-job", async (req, reply) => {
   const { id } = req.params as { id: string };
-  const dev = db.prepare("SELECT pools, pools_override FROM devices WHERE device_id = ?").get(id) as
-    | { pools: string; pools_override: string | null }
-    | undefined;
+  const dev = db
+    .prepare("SELECT pools, pools_override, capabilities FROM devices WHERE device_id = ?")
+    .get(id) as { pools: string; pools_override: string | null; capabilities: string | null } | undefined;
   if (!dev) return reply.code(404).send({ error: "unknown device; register first" });
   touchDevice(id);
-  const spec = await longPollClaim("device", id, effectivePools(dev));
+  const spec = await longPollClaim("device", id, effectivePools(dev), deviceCapabilities(dev));
   if (!spec) return reply.code(204).send();
   return spec;
 });
@@ -320,7 +384,19 @@ app.post("/jobs", async (req, reply) => {
   let spec = req.body as JobSpec;
   if (spec?.schema !== 1) return reply.code(400).send({ error: "schema must be 1" });
   if (!spec.job_id) return reply.code(400).send({ error: "job_id required" });
-  if (!WORKLOADS.has(spec.workload)) return reply.code(400).send({ error: `unknown workload: ${spec.workload}` });
+  if (typeof spec.workload !== "string" || !spec.workload)
+    return reply.code(400).send({ error: "workload required" });
+  // The set below is what the collector and the host executor ship with. Beyond
+  // it, an agent that declares a capability defines the workload — which is how
+  // a new runner adds work the collector has never heard of without a release
+  // here. Refusing when nothing on the fleet can run it keeps the failure at
+  // enqueue time, where the caller sees it, rather than as a job queued forever.
+  if (!workloadServiceableBy(spec.workload, spec.backend ?? null))
+    return reply.code(422).send({
+      error: `no agent can run workload '${spec.workload}'` +
+        (spec.backend ? ` with backend '${spec.backend}'` : "") +
+        "; a device must declare it in the capabilities it registers with",
+    });
   // A job spec is stored in SQLite, served by the API and rendered on the
   // dashboard, so anything in one is effectively published to everyone on the
   // LAN. Refuse secrets outright rather than trusting every future caller to
@@ -377,9 +453,14 @@ app.post("/jobs", async (req, reply) => {
       return reply.code(400).send({ error: "fanout is only for executor: device" });
     const pool = spec.targets?.pool;
     const match = spec.targets?.match;
-    const devices = matchingDevices(pool, match);
+    // Same predicate the claim uses, so fan-out cannot mint a child job for a
+    // device that will then never be offered it.
+    const devices = matchingDevices(pool, match, spec.workload, spec.backend ?? null);
     if (devices.length === 0)
-      return reply.code(400).send({ error: `no registered devices${pool ? ` in pool ${pool}` : ""}${match ? ` matching ${match}` : ""}` });
+      return reply.code(400).send({
+        error: `no registered devices${pool ? ` in pool ${pool}` : ""}${match ? ` matching ${match}` : ""}` +
+          ` can run ${spec.workload}`,
+      });
 
     const insert = db.prepare(
       `INSERT OR IGNORE INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts, priority, parent_job_id, template_id)
@@ -896,8 +977,26 @@ app.post("/api/alerts/tick", async (req, reply) => {
   return { ok: true, opened: (await alertTick()).map((a) => a.id) };
 });
 
-app.listen({ port: PORT, host: "0.0.0.0" }).then(() => {
-  app.log.info(`fleet-collector listening on :${PORT}`);
+app.listen({ port: PORT, host: BIND[0] ?? "0.0.0.0" }).then(() => {
+  // Node binds one address per server, so every address after the first gets a
+  // bare TCP listener whose connections are handed to the same HTTP server.
+  // One Fastify app, one route table, several front doors.
+  for (const host of BIND.slice(1)) {
+    const extra = createServer((socket) => app.server.emit("connection", socket));
+    extra.on("error", (e) => app.log.error(e, `bind ${host}:${PORT} failed`));
+    extra.listen(PORT, host);
+    extra.unref();
+  }
+  app.log.info(`fleet-collector listening on ${BIND.join(", ")}:${PORT}`);
+  if (BIND.includes("0.0.0.0") || BIND.includes("::")) {
+    // Not an error: it is the default and it is right for a LAN-only fleet.
+    // Said out loud because there is no authentication behind it, so the
+    // network is the whole access control and it should be a decision.
+    app.log.warn(
+      "listening on every interface with no authentication; " +
+        "set FLEET_BIND to loopback plus your tailnet address if agents roam",
+    );
+  }
   sweepLeases(); // catch claims that lapsed while the collector was down
   setInterval(sweepLeases, SWEEP_MS).unref();
   setInterval(() => {

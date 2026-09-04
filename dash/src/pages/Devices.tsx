@@ -160,6 +160,7 @@ export function Devices() {
                       <th>Device</th>
                       <th>Hardware</th>
                       <th>Pools</th>
+                      <th>Runs</th>
                       <th>Battery</th>
                       <th>Thermal</th>
                       <th>Doing</th>
@@ -191,6 +192,15 @@ export function Devices() {
                           </div>
                         </td>
                         <td class="dim">{dev.pools.join(", ") || "—"}</td>
+                        <td class="dim wrap-anywhere">
+                          {dev.capabilities === null ? (
+                            <span class="faint" title="Registered before capability routing; offered every workload.">
+                              all
+                            </span>
+                          ) : (
+                            dev.capabilities.join(", ") || "—"
+                          )}
+                        </td>
                         <td>
                           <Battery pct={dev.beacon?.battery_pct ?? null} charging={dev.beacon?.charging ?? null} />
                         </td>

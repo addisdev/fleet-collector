@@ -485,6 +485,54 @@ the 3000 MB floor being what the published eval actually demonstrates, on the
 
 Pools still exist and devices still report them; nothing routes on them.
 
+## Capabilities
+
+A pool is a label a person applied. A **capability** is a statement an agent
+makes about its own code and toolchain, sent with every registration:
+
+```json
+{ "device_id": "pixel-4a", "descriptor": { … },
+  "pools": ["ml-capable"],
+  "capabilities": ["benchmark", "batch", "batch:litert", "pipeline"] }
+```
+
+The queue never hands an agent a workload it did not declare. That is checked
+before `targets.match`, on purpose: an expression narrows the set of eligible
+agents, it cannot grant one a workload its code does not contain.
+
+Two rules are worth knowing because they are what keep an upgrade from breaking
+a running shelf:
+
+- **No `capabilities` key means "no opinion", not "nothing".** An agent that
+  registered before the field existed is offered every workload, exactly as it
+  was. An agent that sends `[]` is offered none — the two are different on
+  purpose.
+- **A re-registration that omits the key keeps what was declared last.** Rolling
+  back to an older runner build must not silently widen it back to everything.
+
+A job naming a backend is satisfied two ways: by an agent declaring the pairing
+(`batch:litert`) or by one declaring the workload outright (`batch`), which
+means it handles every backend it was built with.
+
+`capabilities` is readable from a match expression, so a job can target a
+toolchain rather than hardware:
+
+```json
+{ "targets": { "match": "capabilities ~ 'build:xcode'" } }
+```
+
+### What this changes about `POST /jobs`
+
+The collector used to accept thirteen workload names and refuse everything else.
+It now accepts those thirteen — the ones the collector and the host executor
+ship with, which is why they need no agent to vouch for them — **plus any
+workload some registered agent declares**. Anything else is a 422 naming the
+missing capability, at enqueue time, rather than a job that sits queued forever
+with nothing to explain why.
+
+The point is that a new runner can add a workload the collector has never heard
+of without a release here.
+
 ## Alerts
 
 Evaluated every 60 s (`FLEET_ALERT_TICK_MS`). Alerts are **state, not events**:
