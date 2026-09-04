@@ -91,6 +91,29 @@ const PATHS = {
       <path d="M1.75 8h12.5M8 1.75c2 2 2 10.5 0 12.5M8 1.75c-2 2-2 10.5 0 12.5" />
     </>
   ),
+  // Three stages, left to right, joined: a pipeline is stages in an order.
+  pipeline: (
+    <>
+      <rect x="1.75" y="5.75" width="3.5" height="4.5" rx="1" />
+      <rect x="6.25" y="5.75" width="3.5" height="4.5" rx="1" />
+      <rect x="10.75" y="5.75" width="3.5" height="4.5" rx="1" />
+      <path d="M5.25 8h1M9.75 8h1" />
+    </>
+  ),
+  archive: (
+    <>
+      <rect x="1.75" y="2.75" width="12.5" height="3" rx="1" />
+      <path d="M3 5.75v6.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-6.5" />
+      <path d="M6.5 8.75h3" />
+    </>
+  ),
+  digest: (
+    <>
+      <path d="M4.25 1.75h5l3 3v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1z" />
+      <path d="M9.25 1.75v3h3" />
+      <path d="M6 8h4M6 10.5h4" />
+    </>
+  ),
 } satisfies Record<string, ComponentChildren>;
 
 export type IconName = keyof typeof PATHS;
@@ -121,11 +144,14 @@ export function Icon({ name, size = 14, title }: { name: IconName; size?: number
 
 /** The Fleet Runner glyph: the pulse from the launcher mark, on its ink
  *  square. This is the under-24px form of the mark, the same drawing as
- *  public/favicon.svg. Decorative: the wordmark beside it says the name. */
+ *  public/favicon.svg — except that the tile takes its fill from the
+ *  stylesheet, which lifts it on the dark shell where ink on near-ink would
+ *  leave the pulse floating with no square. Decorative: the wordmark beside it
+ *  says the name. */
 export function Glyph({ size = 20 }: { size?: number }) {
   return (
     <svg class="glyph" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      <rect width="16" height="16" rx="3.5" fill="#1c2025" />
+      <rect class="tile" width="16" height="16" rx="3.5" />
       <path
         d="M3 8.5h2.2l1.4-4 2.4 8 1.5-4H13"
         fill="none"
@@ -138,8 +164,9 @@ export function Glyph({ size = 20 }: { size?: number }) {
   );
 }
 
-/** Which icon a workload gets. Workloads without one (pipeline, archive,
- *  digest) show their name alone; a wrong icon would be worse than none. */
+/** Which icon a workload gets. Covers every workload the collector accepts
+ *  (WORKLOADS in src/server.ts); anything else shows its name alone, because a
+ *  wrong icon would be worse than none. */
 const WORKLOAD_ICON: Record<string, IconName> = {
   install: "install",
   "ui-test": "uitest",
@@ -151,6 +178,9 @@ const WORKLOAD_ICON: Record<string, IconName> = {
   "web-shots": "visual",
   "web-audit": "audit",
   "web-unfurl": "audit",
+  pipeline: "pipeline",
+  archive: "archive",
+  digest: "digest",
 };
 
 /** The workload's name with its icon, for job tables. */
