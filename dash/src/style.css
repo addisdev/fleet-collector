@@ -69,11 +69,11 @@ code, .mono { font-family: var(--mono); font-size: 0.86em; }
 .brand span span { color: var(--ink-faint); font-weight: 400; }
 .glyph { flex: none; display: block; }
 
-/* The mark's tile is brand ink, not a theme token, so it is spelled out rather
-   than pulled from --ink. On the dark shell that ink sits within a hair of
-   --panel and the square disappears, leaving the pulse floating, so the dark
-   tile lifts to the same value the README banner uses. */
-.glyph .tile { fill: #1c2025; }
+/* The mark's tile is brand ink, not a theme token, so the rect carries it as a
+   presentation attribute and is right with no stylesheet at all. Only the dark
+   shell needs a rule: there that ink sits within a hair of --panel and the
+   square disappears, leaving the pulse floating, so the tile lifts to the same
+   value the README banner uses. */
 @media (prefers-color-scheme: dark) { .glyph .tile { fill: #2a2e35; } }
 
 /* --- icons --- */

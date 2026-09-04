@@ -109,7 +109,7 @@ const PATHS = {
   ),
   digest: (
     <>
-      <path d="M4.25 1.75h5l3 3v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1z" />
+      <path d="M4.25 1.75h5l3 3v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V2.75a1 1 0 0 1 1-1z" />
       <path d="M9.25 1.75v3h3" />
       <path d="M6 8h4M6 10.5h4" />
     </>
@@ -144,14 +144,14 @@ export function Icon({ name, size = 14, title }: { name: IconName; size?: number
 
 /** The Fleet Runner glyph: the pulse from the launcher mark, on its ink
  *  square. This is the under-24px form of the mark, the same drawing as
- *  public/favicon.svg — except that the tile takes its fill from the
- *  stylesheet, which lifts it on the dark shell where ink on near-ink would
- *  leave the pulse floating with no square. Decorative: the wordmark beside it
- *  says the name. */
+ *  public/favicon.svg — the tile carries its ink as an attribute, so it is
+ *  right with no stylesheet at all, and style.css lifts it on the dark shell
+ *  where ink on near-ink would leave the pulse floating with no square.
+ *  Decorative: the wordmark beside it says the name. */
 export function Glyph({ size = 20 }: { size?: number }) {
   return (
     <svg class="glyph" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      <rect class="tile" width="16" height="16" rx="3.5" />
+      <rect class="tile" width="16" height="16" rx="3.5" fill="#1c2025" />
       <path
         d="M3 8.5h2.2l1.4-4 2.4 8 1.5-4H13"
         fill="none"
