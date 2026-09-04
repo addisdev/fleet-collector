@@ -48,8 +48,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DEFAULT_LEASE_TTL_S = 600;
 // drain and soak legitimately run for hours between beacons.
 const LONG_LEASE_TTL_S = 4 * 60 * 60;
-const LONG_LEASE_WORKLOADS = new Set(["drain", "soak"]);
+// thermal is minutes rather than hours, but a 15-minute sustained run is still
+// well past the 600 s default, and a swept lease mid-run would requeue a job
+// whose whole value is an unbroken curve.
+const LONG_LEASE_WORKLOADS = new Set(["drain", "soak", "thermal"]);
 const MAX_LEASE_TTL_S = 24 * 60 * 60;
+// Agents beacon every 60 s. Two missed beacons and a state claim is no longer
+// evidence of anything, which matters because these claims gate work rather
+// than merely describing it.
+const BEACON_TRUST_S = 180;
 const DEFAULT_MAX_ATTEMPTS = 3;
 
 const app = Fastify({ logger: { level: process.env.FLEET_LOG ?? "info" } });
@@ -63,7 +70,9 @@ type JobSpec = {
   job_id: string;
   workload: string;
   executor: "device" | "host";
-  fanout?: boolean;
+  // true fans out to every matching device; { distinct: "os" } fans out to one
+  // device per distinct value of that descriptor field.
+  fanout?: boolean | { distinct?: string };
   // Named here rather than left to the index signature because capability
   // routing reads it: an agent may declare a workload outright or only one
   // backend of it ("batch:litert").
@@ -90,6 +99,7 @@ type JobSpec = {
     // is a property of how a device is attached rather than of the device.
     device_kind?: "device" | "simulator";
   };
+  constraints?: Record<string, unknown>;
   lease?: { ttl_s?: number; max_attempts?: number };
   // Queue position and provenance. Both are collector bookkeeping rather than
   // instructions to the runner, which ignores them.
@@ -110,6 +120,11 @@ type JobSpec = {
 const WORKLOADS = new Set([
   "benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak",
   "web-test", "web-shots", "web-audit", "web-unfurl", "archive", "digest",
+  // thermal is a device workload the runners declare, and cold-start is a host
+  // one. Both are listed here anyway because the collector ships their result
+  // views and the dashboard ships their icons and skeletons — a workload the
+  // collector renders is a workload the collector knows about.
+  "thermal", "cold-start", "self-check",
 ]);
 
 function touchDevice(deviceId: string) {
@@ -167,6 +182,67 @@ function workloadServiceableBy(workload: string, backend?: string | null): boole
   });
 }
 
+/**
+ * Preconditions the collector can check before handing out a claim, evaluated
+ * against the device's last beacon.
+ *
+ * Deliberately NOT the whole `constraints` object. `require_charging` and
+ * `min_battery_pct` are enforced by the runner apps against live state, and
+ * they refuse the job with a failed result; moving them here would change that
+ * behaviour and double-enforce it against data up to a minute stale. What is
+ * here is the set that describes a machine being temporarily unsuitable rather
+ * than a device failing a contract — a laptop on battery, or busy, or awake at
+ * the wrong hour has not failed at anything, so the job should stay queued and
+ * be offered again rather than burn an attempt.
+ *
+ * Stale beacons fail closed. A machine that stopped reporting cannot be shown
+ * to be idle, and guessing in the permissive direction is how a benchmark ends
+ * up running while someone is typing.
+ */
+export function constraintsSatisfied(
+  constraints: Record<string, unknown> | undefined,
+  lastBeacon: Record<string, unknown> | null,
+  beaconAgeS: number | null,
+  now = new Date(),
+): boolean {
+  if (!constraints) return true;
+  const wantsAc = constraints.require_ac === true;
+  const wantsIdle = typeof constraints.require_idle_s === "number";
+  const wantsLoad = typeof constraints.max_load === "number";
+  const window = constraints.window as { from?: number; to?: number; tz_offset_min?: number } | undefined;
+
+  if (window && typeof window.from === "number" && typeof window.to === "number") {
+    const shifted = typeof window.tz_offset_min === "number"
+      ? new Date(now.getTime() + window.tz_offset_min * 60_000)
+      : now;
+    const hour = typeof window.tz_offset_min === "number" ? shifted.getUTCHours() : shifted.getHours();
+    // from > to means the window crosses midnight, which is the common case:
+    // "22 to 06" is the night, not an empty set.
+    const inside = window.from <= window.to
+      ? hour >= window.from && hour < window.to
+      : hour >= window.from || hour < window.to;
+    if (!inside) return false;
+  }
+
+  if (!wantsAc && !wantsIdle && !wantsLoad) return true;
+
+  // Everything below reads the beacon, so no beacon means no claim.
+  const sample = (lastBeacon?.beacon ?? lastBeacon) as Record<string, unknown> | null | undefined;
+  if (!sample) return false;
+  if (beaconAgeS !== null && beaconAgeS > BEACON_TRUST_S) return false;
+
+  if (wantsAc && sample.on_ac !== true && sample.charging !== true) return false;
+  if (wantsIdle) {
+    const idle = Number(sample.idle_s);
+    if (!Number.isFinite(idle) || idle < Number(constraints.require_idle_s)) return false;
+  }
+  if (wantsLoad) {
+    const load = Number(sample.load_1m);
+    if (!Number.isFinite(load) || load > Number(constraints.max_load)) return false;
+  }
+  return true;
+}
+
 // Atomically claim the oldest queued job this claimant is eligible for, and
 // start its lease clock.
 const claimTx = db.transaction((
@@ -176,13 +252,22 @@ const claimTx = db.transaction((
   deviceCaps: string[] | null = null,
 ): JobSpec | null => {
   let descriptor: Record<string, unknown> = {};
+  let beacon: Record<string, unknown> | null = null;
+  let beaconAgeS: number | null = null;
   if (executor === "device") {
     // A host-executor job holding this device (exclusive ui-test, drain…)
     // means the agent must idle until the lock is released.
     const locked = db.prepare("SELECT job_id FROM device_locks WHERE device_id = ?").get(claimant);
     if (locked) return null;
-    const dev = db.prepare("SELECT descriptor FROM devices WHERE device_id = ?").get(claimant) as
-      | { descriptor: string } | undefined;
+    const dev = db
+      .prepare(
+        `SELECT descriptor, last_beacon,
+                CAST(strftime('%s','now') - strftime('%s', last_seen) AS INTEGER) AS age_s
+         FROM devices WHERE device_id = ?`,
+      )
+      .get(claimant) as { descriptor: string; last_beacon: string | null; age_s: number | null } | undefined;
+    try { beacon = dev?.last_beacon ? JSON.parse(dev.last_beacon) : null; } catch { beacon = null; }
+    beaconAgeS = dev?.age_s ?? null;
     // targets.match expressions can read `pools`, so they see the effective set
     // the caller resolved, not the runner's raw report.
     descriptor = {
@@ -210,6 +295,10 @@ const claimTx = db.transaction((
       // sits above targets.match on purpose: an expression narrows the set of
       // eligible agents, it does not grant one a workload its code lacks.
       if (!capabilityMatches(deviceCaps, spec.workload, spec.backend ?? null)) continue;
+      // Not a rejection: an unsatisfied constraint leaves the job queued for
+      // the next poll, which is the whole difference between "the laptop is
+      // busy right now" and "this job failed".
+      if (!constraintsSatisfied(spec.constraints, beacon, beaconAgeS)) continue;
       // targets.match: descriptor expression ("ram_mb >= 4000 && os ~ 'android'").
       if (spec.targets?.match) {
         try { if (!evalMatch(spec.targets.match, descriptor)) continue; } catch { continue; }
@@ -318,13 +407,22 @@ app.post("/devices/register", async (req, reply) => {
   // than having them erased: an older build of the same runner re-registering
   // during a rollback would otherwise widen itself back to everything.
   const capabilities = b.capabilities === undefined ? null : JSON.stringify(b.capabilities);
+  // Where it registered from, kept to a /24 (or the IPv6 prefix): enough to
+  // tell the house from a cafe, without keeping a movement log.
+  const net = (() => {
+    const ip = (req.ip ?? "").replace(/^::ffff:/, "");
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip.split(".").slice(0, 3).join(".") + ".0/24";
+    if (ip.includes(":")) return ip.split(":").slice(0, 4).join(":") + "::/64";
+    return null;
+  })();
   db.prepare(
-    `INSERT INTO devices (device_id, descriptor, pools, capabilities, last_seen)
-     VALUES (?, ?, ?, ?, datetime('now'))
+    `INSERT INTO devices (device_id, descriptor, pools, capabilities, last_net, last_seen)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(device_id) DO UPDATE SET
        descriptor = excluded.descriptor, pools = excluded.pools, last_seen = excluded.last_seen,
-       capabilities = COALESCE(excluded.capabilities, devices.capabilities)`,
-  ).run(b.device_id, JSON.stringify(b.descriptor ?? {}), JSON.stringify(b.pools ?? []), capabilities);
+       capabilities = COALESCE(excluded.capabilities, devices.capabilities),
+       last_net = COALESCE(excluded.last_net, devices.last_net)`,
+  ).run(b.device_id, JSON.stringify(b.descriptor ?? {}), JSON.stringify(b.pools ?? []), capabilities, net);
   announce({
     type: "device", device_id: b.device_id, event: "register",
     pools: b.pools ?? [], capabilities: b.capabilities ?? null,
@@ -449,18 +547,43 @@ app.post("/jobs", async (req, reply) => {
     return reply.code(400).send({ error: `invalid targets.match expression: ${spec.targets.match}` });
 
   if (spec.fanout) {
-    if (spec.executor !== "device")
-      return reply.code(400).send({ error: "fanout is only for executor: device" });
     const pool = spec.targets?.pool;
     const match = spec.targets?.match;
+    // Host jobs fan out too now. A host child is pinned with targets.device_id
+    // exactly as a device child is, and the executor's own selectTargets
+    // already honours that field, so nothing downstream needed teaching.
+    const distinct = typeof spec.fanout === "object" && spec.fanout !== null
+      ? (spec.fanout as { distinct?: string }).distinct
+      : undefined;
+    if (distinct !== undefined && typeof distinct !== "string")
+      return reply.code(400).send({ error: "fanout.distinct must be a descriptor field name" });
+
     // Same predicate the claim uses, so fan-out cannot mint a child job for a
-    // device that will then never be offered it.
-    const devices = matchingDevices(pool, match, spec.workload, spec.backend ?? null);
+    // device that will then never be offered it. For host jobs the capability
+    // belongs to the executor rather than the device, so it is not applied.
+    let devices = spec.executor === "device"
+      ? matchingDevices(pool, match, spec.workload, spec.backend ?? null)
+      : matchingDevices(pool, match);
     if (devices.length === 0)
       return reply.code(400).send({
         error: `no registered devices${pool ? ` in pool ${pool}` : ""}${match ? ` matching ${match}` : ""}` +
           ` can run ${spec.workload}`,
       });
+
+    // "One per distinct OS" is the canary shape: a smoke pass on every OS on
+    // the shelf without paying for every phone. Newest-seen wins within a
+    // group, because that is the device most likely to still be plugged in.
+    if (distinct) {
+      const seen = new Map<string, typeof devices[number]>();
+      for (const d of devices) {
+        const key = String(
+          (JSON.parse(d.descriptor) as Record<string, unknown>)[distinct] ?? "",
+        );
+        // matchingDevices returns registry order, which is last_seen DESC.
+        if (!seen.has(key)) seen.set(key, d);
+      }
+      devices = [...seen.values()];
+    }
 
     const insert = db.prepare(
       `INSERT OR IGNORE INTO jobs (job_id, executor, workload, spec, lease_ttl_s, max_attempts, priority, parent_job_id, template_id)

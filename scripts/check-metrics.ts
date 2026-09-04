@@ -79,12 +79,26 @@ if (problems.length) {
   process.exit(1);
 }
 
-// Regenerated on every green run so the runner repos have something to check
-// against without vendoring the whole schema.
+// Regenerated so the runner repos have something to check against without
+// vendoring the whole schema.
+//
+// It is also checked, not merely written. The mirror is what an agent working
+// in another repository reads, and a mirror that lags result.schema.json is
+// worse than none: it states a contract confidently and wrongly, and the reader
+// has no way to tell. Locally the file is rewritten and the run continues; in
+// CI a stale mirror fails, so what is committed is what the schema says.
 const mirror = JSON.stringify({ schema: 1, metrics: declared.sort() }, null, 2) + "\n";
 const before = (() => { try { return readFileSync(MIRROR, "utf8"); } catch { return ""; } })();
 if (before !== mirror) {
   writeFileSync(MIRROR, mirror);
+  if (process.env.CI) {
+    console.error(
+      "schemas/metrics.json is out of date with schemas/result.schema.json.\n" +
+        "It has been regenerated — commit it. Anything reading the mirror instead of\n" +
+        "the schema was reading a stale contract until now.",
+    );
+    process.exit(1);
+  }
   console.log(`metric names: ${declared.length} declared, schemas/metrics.json refreshed`);
 } else {
   console.log(`metric names: ${declared.length} declared, all reads accounted for`);

@@ -190,6 +190,14 @@ export function registerVisual(app: FastifyInstance) {
          accepted_at = excluded.accepted_at,
          accepted_from_job = excluded.accepted_from_job`,
     ).run(b.suite, b.page, b.profile, b.sha256, b.job_id ?? null);
+    // Accepting a shot is the moment its bytes stop being one run's output and
+    // start being the thing every future run is judged against, so it is also
+    // the moment it must survive artifact collection. Pinning here rather than
+    // relying on the GC scan means a baseline is safe even if the scan is
+    // later narrowed or a pruning pass is written that never heard of it.
+    db.prepare(
+      "UPDATE artifacts SET pinned = 1, pin_reason = ? WHERE sha256 = ?",
+    ).run(`accepted visual baseline for ${b.suite}/${b.page} (${b.profile})`, b.sha256);
     return reply.code(201).send({ ok: true, suite: b.suite, page: b.page, profile: b.profile, sha256: b.sha256 });
   });
 }

@@ -32,7 +32,10 @@
         "decode_tok_s": { "type": "number" },
         "ttft_ms": { "type": "number" },
         "peak_mem_mb": { "type": "number" },
-        "mem_method": { "enum": ["phys_footprint", "pss"] },
+        "mem_method": {
+        "enum": ["phys_footprint", "pss", "max_rss"],
+        "description": "How peak_mem_mb was measured, so two numbers are never compared as if they were the same quantity. phys_footprint is iOS, pss is Android and Linux. max_rss is what macOS and Windows can honestly offer for a subprocess: it counts shared pages the other two do not, so it reads high against them and must not be silently folded in with pss."
+      },
         "thermal": { "type": "array", "items": { "enum": ["nominal", "fair", "serious", "critical"] } },
         "battery_start_pct": { "type": "number" },
         "battery_end_pct": { "type": "number" },
@@ -42,6 +45,16 @@
         "p50_ms": { "type": "number", "description": "vision-eval: median per-image inference latency" },
         "p95_ms": { "type": "number", "description": "vision-eval: 95th-percentile per-image inference latency" },
         "images_per_s": { "type": "number", "description": "vision-eval: throughput" },
+
+      "elapsed_s": { "type": "number", "description": "thermal: seconds since the run started, so a row is a point on a curve rather than a summary" },
+      "thermal_state": { "type": "string", "description": "thermal: the OS thermal state at this sample. A string because Android and iOS name their levels differently and flattening them would invent a scale neither vendor publishes" },
+
+      "launch_ms": { "type": "number", "description": "cold-start: time to first frame for one launch" },
+      "launch_state": { "type": "string", "enum": ["cold", "warm", "hot"], "description": "cold-start: which launch this row measured. p50 across mixed states is meaningless, so the state is a field rather than a note" },
+
+      "disk_free_gb": { "type": "number", "description": "self-check: free space on the executor host's data volume" },
+      "clock_offset_ms": { "type": "number", "description": "self-check: offset against NTP. A skewed executor clock makes every duration in the results table wrong in a way nothing else would reveal" },
+      "checks_failed": { "type": "number", "description": "self-check: how many host checks failed, so the alert rule needs no parsing" },
         "drain_pct_per_h": { "type": "number", "description": "drain: battery percent consumed per hour" },
         "diff_pct": { "type": "number", "description": "web-shots: percent of pixels differing from the accepted baseline (100 when the dimensions changed)" },
 

@@ -110,6 +110,8 @@ export type Device = {
   pools: string[];
   /** null = an agent that predates capability routing; it is offered everything. */
   capabilities: string[] | null;
+  /** /24 the agent last registered from. Distinguishes "offline" from "elsewhere". */
+  last_net: string | null;
   pools_reported: string[];
   pools_override: string[] | null;
   platform: "ios" | "android";

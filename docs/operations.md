@@ -485,6 +485,23 @@ the 3000 MB floor being what the published eval actually demonstrates, on the
 
 Pools still exist and devices still report them; nothing routes on them.
 
+## The regression rules
+
+Three rules watch a metric against its own history rather than against a fixed
+threshold: `benchmark-regressed`, `cold-start-regressed` and `batch-regressed`.
+
+The comparison key matters more than the threshold. Two runs are only
+comparable on the same device with the same model, quant and backend, and
+comparing across any of those is how a "regression" turns out to be a different
+model. The baseline is the median of the trailing seven days, needs at least
+four prior runs, and the alert's subject is keyed on the same tuple the
+comparison was — so a device that has genuinely got slower is one alert with a
+rising `seen_count`, not a new one every night.
+
+Percent rather than absolute, because the shelf spans a 2016 phone and current
+silicon and one threshold in tok/s would be noise on one and silence on the
+other.
+
 ## Capabilities
 
 A pool is a label a person applied. A **capability** is a statement an agent
@@ -533,6 +550,120 @@ with nothing to explain why.
 The point is that a new runner can add a workload the collector has never heard
 of without a release here.
 
+## Network shaping
+
+Any host job may carry `params.network`: `offline`, `offline-after-<n>s`, `3g`
+or `lossy`. It is applied before the workload and always restored in a
+`finally`, and the intent is journalled to `~/.fleet/network-shape.json` before
+the device is touched, so a crash between the two is still recoverable. The
+executor restores every attached device on startup, before its first claim — a
+phone left offline by a crashed executor is a phone that looks dead forever.
+
+An unknown profile name throws. A typo that silently ran unshaped would turn an
+offline test into a test that proves nothing and still passes, which is the one
+outcome worth engineering against here.
+
+What is actually reachable is narrower than the vocabulary suggests, and the
+refusals are deliberate:
+
+| Profile | Android device | iOS simulator | iOS device |
+|---|---|---|---|
+| `offline` | `svc wifi disable`, verified afterwards | not supported | not supported |
+| `3g` / `lossy` | refused | host `dnctl`/`pfctl`, opt-in | refused |
+
+- **`offline` is refused on an adb-tcp serial.** Disabling wifi there cuts the
+  executor's own control channel, leaving no way to restore and a permanently
+  stranded phone.
+- **`3g` and `lossy` on a real phone are refused**, not approximated. In-device
+  shaping needs root, and host dummynet only shapes traffic that transits the
+  Mac, which a phone on wifi does not.
+- **`simctl status_bar override --dataNetwork` is not used.** It redraws the
+  status-bar icon and changes no packet — the purest form of the fake-offline
+  trap this module exists to avoid.
+- **Cellular data is only re-enabled if the journal says we disabled it.**
+  Turning data back on for a device deliberately kept off a metered SIM costs
+  real money.
+
+### Host-side shaping is opt-in and needs one-time setup
+
+The `dnctl`/`pfctl` path is gated on three preconditions it verifies rather than
+assumes, because pf silently ignores rules loaded into an anchor nothing
+references — a no-op that looks exactly like success:
+
+1. `FLEET_NET_SHAPE_HOST=1`
+2. passwordless sudo for `dnctl` and `pfctl`
+3. a `fleet-shape` anchor actually referenced in `/etc/pf.conf`:
+
+```
+dummynet-anchor "fleet-shape"
+anchor "fleet-shape"
+```
+
+The executor will not edit `/etc/pf.conf` itself. Shaping also requires a scoped
+destination (`params.network_to`, or `targets.url`): unscoped, it would shape
+the executor's own link to the collector and to adb.
+
+**This path is reasoned through but has not been run.** Adding the anchor and
+exercising it once by hand is worth doing before a schedule depends on it.
+
+## Constraints
+
+`constraints` on a job spec is enforced in two places, and which place matters.
+
+`require_charging` and `min_battery_pct` are enforced by the **runner app**, at
+claim time, against live state. A device that fails one refuses the job with a
+failed result. That is right for a contract about the device: a benchmark on a
+throttling phone would produce a number that lies, and a lie recorded as a
+result is worse than a failure.
+
+`require_ac`, `require_idle_s`, `max_load` and `window` are enforced by the
+**collector**, before the claim, against the device's last beacon. An
+unsatisfied one leaves the job queued and offers it again on the next poll. A
+laptop that is on battery, or busy, or awake at the wrong hour has not failed at
+anything — it is merely unsuitable right now, and burning an attempt on that
+would exhaust `max_attempts` on a machine that was working perfectly.
+
+```json
+{ "constraints": { "require_ac": true, "require_idle_s": 300, "max_load": 2,
+                   "window": { "from": 1, "to": 6 } } }
+```
+
+`window` crosses midnight when `from > to`: `22` to `06` is the night, not an
+empty set. Stale beacons fail closed — a machine that stopped reporting cannot
+be shown to be idle, and guessing permissively is how a benchmark ends up
+running while someone is typing.
+
+## Fan-out
+
+`fanout: true` enqueues one child per matching device, pinned with
+`targets.device_id` and suffixed `--<device_id>`.
+
+`fanout: { "distinct": "os" }` enqueues one child per distinct value of that
+descriptor field, newest-seen first. That is the canary shape: a smoke pass on
+every OS on the shelf without paying for every phone.
+
+Host jobs fan out too. A host child is pinned exactly as a device child is, and
+the executor's own target selection already honours `targets.device_id`, so an
+`install` plus `ui-test` pair can cover the OS matrix with two job specs.
+
+## Artifact pins
+
+The GC reference scan reads job specs, results, schedules and templates. Two
+kinds of artifact are safe from deletion without appearing in it:
+
+- **Accepted visual baselines.** A baseline is referenced by a row in
+  `baselines`, not by text in any spec, so the scan would have offered every one
+  of them for collection — while its entire purpose is to still exist months
+  later to diff against. Accepting a shot now pins its artifact, and both the
+  GC candidate list and the delete endpoint refuse it by name.
+- **Anything pinned by hand**, with a reason. `POST /api/artifacts/:sha/pin`
+  takes `{ "pinned": true, "reason": "..." }`. The reason is stored because a
+  pin with no reason is one nobody will ever dare remove.
+
+The artifacts page shows this in a "Kept" column, because the only honest
+reading of "references: 0" without it is "free to delete", which for a baseline
+is exactly wrong.
+
 ## Alerts
 
 Evaluated every 60 s (`FLEET_ALERT_TICK_MS`). Alerts are **state, not events**:
@@ -547,6 +678,9 @@ stops. A device offline for six hours is one row with a rising `seen_count`, not
 | `low-battery` | below `FLEET_ALERT_LOW_BATTERY_PCT` (default 15) and not charging |
 | `job-failed` | a job failed in the last 24 h |
 | `job-stuck` | claimed, lease still being renewed, but no result rows after 2× the lease TTL |
+| `benchmark-regressed` | decode throughput fell more than `FLEET_ALERT_REGRESSION_PCT` (10%) against its own 7-day median |
+| `cold-start-regressed` | launch time rose past the same threshold against its own median |
+| `batch-regressed` | top-1 accuracy fell past the same threshold |
 | `schedule-missed` | an enabled schedule that has run before missed its firing by 5 min |
 | `db-size` / `log-size` | past `FLEET_ALERT_DB_BYTES` / `FLEET_ALERT_LOG_BYTES` |
 

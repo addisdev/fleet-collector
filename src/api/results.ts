@@ -248,6 +248,161 @@ export function registerResults(app: FastifyInstance) {
    * returned with pct_per_h_inferred set — a number labelled "tok/s" in storage
    * must not be charted as tok/s, and must not be silently relabelled either.
    */
+  /**
+   * Thermal runs: throughput against elapsed time, which is a curve rather
+   * than a number. The whole point is what happens after the first minute, so
+   * every iteration's row is returned rather than a summary — and the moment
+   * the OS first changed thermal state is called out, because that is usually
+   * where the curve bends and it is the thing a summary would lose.
+   */
+  app.get("/api/results/thermal", async () => {
+    const jobs = db
+      .prepare(
+        `SELECT job_id, spec, status, created_at, finished_at FROM jobs
+         WHERE workload = 'thermal' ORDER BY created_at DESC LIMIT 50`,
+      )
+      .all() as { job_id: string; spec: string; status: string; created_at: string; finished_at: string | null }[];
+
+    return {
+      runs: jobs.map((j) => {
+        const spec = parse<Record<string, any>>(j.spec, {});
+        const rows = (
+          db
+            .prepare(
+              `SELECT device_id, iter, payload FROM results
+               WHERE job_id = ? AND device_id NOT LIKE 'host:%' ORDER BY device_id, iter`,
+            )
+            .all(j.job_id) as { device_id: string; iter: number; payload: string }[]
+        ).map((r) => {
+          const p = parse<Record<string, any>>(r.payload, {});
+          const m = p.metrics ?? {};
+          return {
+            device_id: r.device_id,
+            iter: r.iter,
+            final: p.final === true,
+            elapsed_s: typeof m.elapsed_s === "number" ? m.elapsed_s : null,
+            decode_tok_s: typeof m.decode_tok_s === "number" ? m.decode_tok_s : null,
+            thermal_state: m.thermal_state ?? null,
+            battery_pct: m.battery_end_pct ?? m.battery_start_pct ?? null,
+            ok: p.ok !== false,
+            error: p.error ?? null,
+          };
+        });
+
+        const byDevice = new Map<string, typeof rows>();
+        for (const r of rows) byDevice.set(r.device_id, [...(byDevice.get(r.device_id) ?? []), r]);
+
+        return {
+          job_id: j.job_id,
+          status: j.status,
+          model: spec.model?.name ?? null,
+          quant: spec.model?.quant ?? null,
+          backend: spec.backend ?? null,
+          duration_s: spec.params?.duration_s ?? null,
+          started_at: iso(j.created_at),
+          finished_at: iso(j.finished_at),
+          devices: [...byDevice].map(([device_id, curve]) => {
+            const measured = curve.filter((c) => !c.final && c.decode_tok_s !== null);
+            const first = measured[0]?.decode_tok_s ?? null;
+            const last = measured[measured.length - 1]?.decode_tok_s ?? null;
+            // Where the OS first admitted the device was warming up. Reported
+            // as elapsed seconds because that is the axis of the chart.
+            const baseState = measured[0]?.thermal_state ?? null;
+            const bend = measured.find((c) => c.thermal_state !== null && c.thermal_state !== baseState);
+            return {
+              device_id,
+              samples: measured.length,
+              first_tok_s: first,
+              last_tok_s: last,
+              // Negative means it got slower, which is the expected direction
+              // and the reason the workload exists.
+              drop_pct: first && last ? ((last - first) / first) * 100 : null,
+              throttled_at_s: bend?.elapsed_s ?? null,
+              throttled_to: bend?.thermal_state ?? null,
+              curve: measured,
+            };
+          }),
+        };
+      }),
+    };
+  });
+
+  /**
+   * Cold-start runs: one row per launch, so p50 and p95 are computed over real
+   * launches rather than over a number the runner already averaged. Split by
+   * launch state, because a p95 mixing cold and hot launches describes nothing
+   * that ever happens to a user.
+   */
+  app.get("/api/results/cold-start", async () => {
+    const jobs = db
+      .prepare(
+        `SELECT job_id, spec, status, created_at, finished_at FROM jobs
+         WHERE workload = 'cold-start' ORDER BY created_at DESC LIMIT 50`,
+      )
+      .all() as { job_id: string; spec: string; status: string; created_at: string; finished_at: string | null }[];
+
+    const pct = (xs: number[], p: number): number | null => {
+      if (xs.length === 0) return null;
+      const sorted = [...xs].sort((a, b) => a - b);
+      // Nearest-rank: with ten launches the p95 should be a launch that
+      // happened, not an interpolation between two that did.
+      const rank = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
+      return sorted[Math.max(0, rank)];
+    };
+
+    return {
+      runs: jobs.map((j) => {
+        const spec = parse<Record<string, any>>(j.spec, {});
+        const rows = (
+          db
+            .prepare(
+              `SELECT device_id, payload FROM results
+               WHERE job_id = ? AND device_id NOT LIKE 'host:%'`,
+            )
+            .all(j.job_id) as { device_id: string; payload: string }[]
+        ).map((r) => {
+          const p = parse<Record<string, any>>(r.payload, {});
+          const m = p.metrics ?? {};
+          return {
+            device_id: r.device_id,
+            launch_ms: typeof m.launch_ms === "number" ? m.launch_ms : null,
+            launch_state: (m.launch_state ?? null) as string | null,
+            final: p.final === true,
+            ok: p.ok !== false,
+            error: p.error ?? null,
+          };
+        });
+
+        const byDevice = new Map<string, typeof rows>();
+        for (const r of rows) byDevice.set(r.device_id, [...(byDevice.get(r.device_id) ?? []), r]);
+
+        return {
+          job_id: j.job_id,
+          status: j.status,
+          app: spec.app?.name ?? spec.params?.app_id ?? null,
+          build: spec.app?.build ?? null,
+          started_at: iso(j.created_at),
+          finished_at: iso(j.finished_at),
+          devices: [...byDevice].map(([device_id, launches]) => {
+            const states = ["cold", "warm", "hot"] as const;
+            return {
+              device_id,
+              error: launches.find((l) => l.error)?.error ?? null,
+              states: states
+                .map((state) => {
+                  const ms = launches
+                    .filter((l) => l.launch_state === state && l.launch_ms !== null)
+                    .map((l) => l.launch_ms as number);
+                  return { state, launches: ms.length, p50_ms: pct(ms, 50), p95_ms: pct(ms, 95) };
+                })
+                .filter((s) => s.launches > 0),
+            };
+          }),
+        };
+      }),
+    };
+  });
+
   app.get("/api/results/drain", async () => {
     const jobs = db
       .prepare(

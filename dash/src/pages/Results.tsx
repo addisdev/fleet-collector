@@ -14,8 +14,10 @@ import { Link, Loaded, Panel, Pill, Select, agoFrom, clock, duration, num } from
 
 const VIEWS = [
   ["bench", "Benchmarks"],
+  ["thermal", "Thermal"],
   ["vision", "Vision eval"],
   ["ui", "UI tests"],
+  ["cold-start", "Cold start"],
   ["drain", "Drain"],
   ["soak", "Soak"],
 ] as const;
@@ -423,6 +425,181 @@ type DrainRun = {
   curve: { device_id: string; ts: string | null; battery_pct: number | null }[];
 };
 
+type ThermalSample = {
+  iter: number; elapsed_s: number | null; decode_tok_s: number | null; thermal_state: string | null;
+};
+type ThermalDevice = {
+  device_id: string; samples: number; first_tok_s: number | null; last_tok_s: number | null;
+  drop_pct: number | null; throttled_at_s: number | null; throttled_to: string | null;
+  curve: ThermalSample[];
+};
+type ThermalRun = {
+  job_id: string; status: string; model: string | null; quant: string | null; backend: string | null;
+  duration_s: number | null; started_at: string | null; finished_at: string | null; devices: ThermalDevice[];
+};
+
+/** Sustained throughput. A benchmark says how fast a cold device is; this says
+ *  whether that number survives the device getting warm, which is the number a
+ *  user actually experiences. The headline is the drop, not the peak. */
+function Thermal() {
+  const state = useApi<{ runs: ThermalRun[] }>("/api/results/thermal", ["result"], 60_000);
+  return (
+    <Loaded state={state} what="thermal runs">
+      {(d) =>
+        d.runs.length === 0 ? (
+          <Panel>
+            <p class="empty">No thermal runs yet.</p>
+          </Panel>
+        ) : (
+          <>
+            {d.runs.map((r) => (
+              <Panel
+                key={r.job_id}
+                title={`${r.model ?? "thermal"}${r.quant ? ` · ${r.quant}` : ""} — ${r.job_id}`}
+                aside={<Csv name={`thermal-${r.job_id}`} rows={r.devices as unknown as Record<string, unknown>[]} />}
+              >
+                <p class="empty">
+                  <Link to={`/jobs/${encodeURIComponent(r.job_id)}`}>
+                    <code>{r.job_id}</code>
+                  </Link>{" "}
+                  · {clock(r.started_at)}
+                  {r.duration_s ? ` · ${duration(r.duration_s)} requested` : ""}
+                  {r.backend ? ` · ${r.backend}` : ""}
+                </p>
+
+                {r.devices.some((dev) => dev.curve.length > 0) && (
+                  <MultiSeries
+                    unit="tok/s"
+                    series={r.devices.map((dev) => ({
+                      name: dev.device_id,
+                      // Elapsed seconds, not wall-clock: two runs on different
+                      // days should lie on top of each other.
+                      points: dev.curve
+                        .filter((c) => c.elapsed_s !== null && c.decode_tok_s !== null)
+                        .map((c) => ({ t: (c.elapsed_s as number) * 1000, v: c.decode_tok_s })),
+                    }))}
+                  />
+                )}
+
+                <div class="scroll">
+                  <table>
+                    <tr>
+                      <th>Device</th>
+                      <th>Samples</th>
+                      <th>First</th>
+                      <th>Last</th>
+                      <th>Change</th>
+                      <th>Throttled</th>
+                    </tr>
+                    {r.devices.map((dev) => (
+                      <tr key={dev.device_id}>
+                        <td class="wrap-anywhere">
+                          <Link to={`/devices/${encodeURIComponent(dev.device_id)}`}>{dev.device_id}</Link>
+                        </td>
+                        <td class="dim">{dev.samples}</td>
+                        <td>{num(dev.first_tok_s)}</td>
+                        <td>{num(dev.last_tok_s)}</td>
+                        <td class={dev.drop_pct !== null && dev.drop_pct <= -10 ? "bad" : undefined}>
+                          {dev.drop_pct === null ? "—" : `${dev.drop_pct > 0 ? "+" : ""}${dev.drop_pct.toFixed(1)}%`}
+                        </td>
+                        <td class="dim">
+                          {dev.throttled_at_s === null
+                            ? "not while measured"
+                            : `${duration(dev.throttled_at_s)} → ${dev.throttled_to}`}
+                        </td>
+                      </tr>
+                    ))}
+                  </table>
+                </div>
+              </Panel>
+            ))}
+          </>
+        )
+      }
+    </Loaded>
+  );
+}
+
+type ColdStartRun = {
+  job_id: string; status: string; app: string | null; build: string | null;
+  started_at: string | null; finished_at: string | null;
+  devices: {
+    device_id: string; error: string | null;
+    states: { state: string; launches: number; p50_ms: number | null; p95_ms: number | null }[];
+  }[];
+};
+
+/** Launch time per device, split by launch state. The oldest phone on the shelf
+ *  is the one users complain about, and this is the table that says so. */
+function ColdStart() {
+  const state = useApi<{ runs: ColdStartRun[] }>("/api/results/cold-start", ["result"], 60_000);
+  return (
+    <Loaded state={state} what="cold-start runs">
+      {(d) =>
+        d.runs.length === 0 ? (
+          <Panel>
+            <p class="empty">No cold-start runs yet.</p>
+          </Panel>
+        ) : (
+          <>
+            {d.runs.map((r) => (
+              <Panel
+                key={r.job_id}
+                title={`${r.app ?? "cold-start"}${r.build ? ` · ${r.build}` : ""} — ${r.job_id}`}
+                aside={<Csv name={`cold-start-${r.job_id}`} rows={r.devices as unknown as Record<string, unknown>[]} />}
+              >
+                <p class="empty">
+                  <Link to={`/jobs/${encodeURIComponent(r.job_id)}`}>
+                    <code>{r.job_id}</code>
+                  </Link>{" "}
+                  · {clock(r.started_at)}
+                </p>
+                <div class="scroll">
+                  <table>
+                    <tr>
+                      <th>Device</th>
+                      <th>State</th>
+                      <th>Launches</th>
+                      <th>p50</th>
+                      <th>p95</th>
+                    </tr>
+                    {r.devices.flatMap((dev) =>
+                      dev.states.length === 0
+                        ? [
+                            <tr key={dev.device_id}>
+                              <td class="wrap-anywhere">{dev.device_id}</td>
+                              <td class="dim" colSpan={4}>
+                                {dev.error ?? "no launches measured"}
+                              </td>
+                            </tr>,
+                          ]
+                        : dev.states.map((st, i) => (
+                            <tr key={`${dev.device_id}-${st.state}`}>
+                              <td class="wrap-anywhere">
+                                {i === 0 ? (
+                                  <Link to={`/devices/${encodeURIComponent(dev.device_id)}`}>{dev.device_id}</Link>
+                                ) : (
+                                  ""
+                                )}
+                              </td>
+                              <td class="dim">{st.state}</td>
+                              <td class="dim">{st.launches}</td>
+                              <td>{st.p50_ms === null ? "—" : `${Math.round(st.p50_ms)} ms`}</td>
+                              <td>{st.p95_ms === null ? "—" : `${Math.round(st.p95_ms)} ms`}</td>
+                            </tr>
+                          )),
+                    )}
+                  </table>
+                </div>
+              </Panel>
+            ))}
+          </>
+        )
+      }
+    </Loaded>
+  );
+}
+
 function Drain() {
   const state = useApi<{ runs: DrainRun[] }>("/api/results/drain", ["result"], 60_000);
   return (
@@ -620,6 +797,8 @@ export function Results() {
       </Panel>
 
       {view === "bench" && <Bench hideSims={hideSims} />}
+      {view === "thermal" && <Thermal />}
+      {view === "cold-start" && <ColdStart />}
       {view === "vision" && <Vision hideSims={hideSims} />}
       {view === "ui" && <UiTests />}
       {view === "drain" && <Drain />}

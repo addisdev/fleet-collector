@@ -8,7 +8,14 @@
     "schema": { "const": 1 },
     "job_id": { "type": "string", "minLength": 1 },
     "workload": {
-      "enum": ["benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak", "web-test", "web-shots", "web-audit", "web-unfurl", "archive", "digest"]
+      "type": "string",
+      "minLength": 1,
+      "description": "No longer a closed enum. The names below are what the collector and the host executor ship with; beyond them, the collector accepts any workload some registered agent declares in its capabilities, and refuses the rest with a 422 naming the missing capability. That is what lets a new runner add work without a release in the collector.",
+      "examples": [
+        "benchmark", "batch", "pipeline", "install", "ui-test", "drain", "soak",
+        "web-test", "web-shots", "web-audit", "web-unfurl", "archive", "digest",
+        "thermal", "cold-start", "self-check"
+      ]
     },
     "executor": {
       "enum": ["device", "host"],
@@ -66,8 +73,16 @@
       "additionalProperties": false
     },
     "fanout": {
-      "type": "boolean",
-      "description": "device-executor only: enqueue one child job per registered device in targets.pool (or all devices), each pinned via targets.device_id with job_id suffixed --<device_id>"
+      "description": "Enqueue one child job per selected device, each pinned via targets.device_id with job_id suffixed --<device_id>. true selects every device targets.pool/match matches. { \"distinct\": \"os\" } selects one device per distinct value of that descriptor field, newest-seen first — the canary shape: a smoke pass on every OS on the shelf without paying for every phone. Host jobs may fan out too; a host child is pinned the same way and the executor's target selection already honours it.",
+      "oneOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "required": ["distinct"],
+          "properties": { "distinct": { "type": "string", "description": "descriptor field to group by, e.g. \"os\" or \"soc\"" } },
+          "additionalProperties": false
+        }
+      ]
     },
     "targets": {
       "type": "object",
@@ -83,9 +98,34 @@
     },
     "constraints": {
       "type": "object",
+      "description": "Device-state preconditions. require_charging and min_battery_pct are enforced by the runner app at claim time, against live state: it refuses the job with a failed result. The rest are enforced by the collector before the claim, against the device's last beacon, so the job stays queued and is offered again later rather than burning an attempt. The split is deliberate — a laptop that is merely busy has not failed at anything.",
       "properties": {
         "require_charging": { "type": "boolean" },
-        "min_battery_pct": { "type": "number" }
+        "min_battery_pct": { "type": "number" },
+        "require_ac": {
+          "type": "boolean",
+          "description": "Only claim while on mains power. A laptop on battery throttles hard enough to turn a benchmark trend line into noise."
+        },
+        "require_idle_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Only claim after the machine has been idle this long. Keeps a job from spinning up the fans while someone is typing."
+        },
+        "max_load": {
+          "type": "number",
+          "description": "Only claim while the 1-minute load average is at or below this."
+        },
+        "window": {
+          "type": "object",
+          "description": "Only claim inside this local-time window. Crossing midnight is allowed: from 22 to 06 means the night, not an empty set.",
+          "required": ["from", "to"],
+          "properties": {
+            "from": { "type": "integer", "minimum": 0, "maximum": 23 },
+            "to": { "type": "integer", "minimum": 0, "maximum": 23 },
+            "tz_offset_min": { "type": "integer", "description": "Minutes east of UTC for the window's clock; omit for the collector's own." }
+          },
+          "additionalProperties": false
+        }
       }
     },
     "report_to": {

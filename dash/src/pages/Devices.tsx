@@ -217,7 +217,10 @@ export function Devices() {
                           )}
                           {dev.lock && <div class="faint">locked</div>}
                         </td>
-                        <td class="dim">{agoFrom(dev.last_seen)}</td>
+                        <td class="dim">
+                          {agoFrom(dev.last_seen)}
+                          {dev.last_net && <div class="faint">{dev.last_net}</div>}
+                        </td>
                       </tr>
                     ))}
                   </table>

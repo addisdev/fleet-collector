@@ -9,6 +9,8 @@ import {
   adbFailureIsWorthReporting,
 } from "../src/targets.js";
 import { evalMatch } from "../src/match.js";
+import { parseAmStart, amStartProblem } from "../src/am-start.js";
+import { parseNetworkProfile } from "../src/network-shape.js";
 import { redact, keychainPassword } from "../src/secrets.js";
 
 const BASE = process.env.FLEET_URL ?? "http://127.0.0.1:8788";
@@ -162,13 +164,18 @@ console.log(`smoke against ${BASE}`);
     schema: 1, job_id: LEASE_JOB, workload: "benchmark", executor: "device",
     model: { name: "smoke-model", format: "gguf", quant: "Q4_K_M", sha256: "0".repeat(64) },
     targets: { pool: "ml-capable" },
-    lease: { ttl_s: 2, max_attempts: 2 },
+    // Four seconds, not two. SQLite stores whole seconds, so a renewal lands a
+    // deadline anywhere in [ttl-1, ttl] from now; with a 2 s lease the margin
+    // after a 1 s wait was under a second, and on a loaded machine this test
+    // decided the sweep had eaten a lease it had not. The assertion is about
+    // renewal, not about timer precision, so give it room to be about that.
+    lease: { ttl_s: 4, max_attempts: 2 },
   });
   check("short-lease job enqueues", r.status === 201, JSON.stringify(r));
 
   const claim = await json("GET", `/devices/${DEVICE}/next-job`);
   check("device claims short-lease job", claim.body?.job_id === LEASE_JOB, JSON.stringify(claim.body));
-  check("claimed spec carries effective lease", claim.body?.lease?.ttl_s === 2 && claim.body?.lease?.max_attempts === 2);
+  check("claimed spec carries effective lease", claim.body?.lease?.ttl_s === 4 && claim.body?.lease?.max_attempts === 2);
 
   const claimed = await json("GET", `/jobs/${LEASE_JOB}`);
   check(
@@ -190,7 +197,8 @@ console.log(`smoke against ${BASE}`);
   check("job still claimed after renewal", (await json("GET", `/jobs/${LEASE_JOB}`)).body?.status === "claimed");
 
   // Now the runner dies: beacons stop, the lease lapses, the sweep requeues it.
-  await sleep(2500);
+  // Comfortably past the renewed four-second deadline, for the same reason.
+  await sleep(5000);
   const swept = await json("POST", "/jobs/sweep");
   check("sweep requeues the expired claim", swept.body?.requeued?.includes(LEASE_JOB), JSON.stringify(swept.body));
   const requeued = await json("GET", `/jobs/${LEASE_JOB}`);
@@ -213,7 +221,8 @@ console.log(`smoke against ${BASE}`);
   check("requeued job is handed out again", reclaim.body?.job_id === LEASE_JOB, JSON.stringify(reclaim.body));
   check("retry counts as a second attempt", (await json("GET", `/jobs/${LEASE_JOB}`)).body?.attempts === 2);
 
-  await sleep(2500);
+  // Past the four-second lease again; the reclaim reset the deadline.
+  await sleep(5000);
   const final = await json("POST", "/jobs/sweep");
   // Assert the OUTCOME, not this particular sweep's return value. The collector
   // runs its own sweep every SWEEP_MS, so it frequently gets there first and
@@ -1887,6 +1896,233 @@ for (const [workload, device] of [["web-audit", "web:audit"], ["web-unfurl", "we
   const capKids = (fanCaps.body?.fanout ?? []) as string[];
   check("fanout skips agents that cannot run the workload",
     capKids.length === 1 && capKids[0].endsWith(LEGACY), JSON.stringify(fanCaps.body));
+}
+
+// --- laptop constraints ---
+
+// require_charging and min_battery_pct are enforced by the runner against live
+// state. These are enforced here, before the claim, because a laptop that is
+// merely on battery or merely busy has not failed at anything — the job should
+// wait rather than burn an attempt.
+{
+  const CONS = `smoke-cons-${run}`;
+  const beacon = (extra: Record<string, unknown>) =>
+    json("POST", "/results", { schema: 1, kind: "beacon", device_id: CONS, beacon: { battery_pct: 90, charging: false, thermal: "nominal", ...extra } });
+
+  await json("POST", "/devices/register", {
+    device_id: CONS, descriptor: { model: "MacBook", os: "macos-15", kind: "laptop" },
+    pools: [], capabilities: ["benchmark"],
+  });
+
+  await beacon({ on_ac: false, idle_s: 0, load_1m: 8 });
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-cons-ac-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
+    targets: { device_id: CONS }, constraints: { require_ac: true },
+  });
+  const onBattery = await json("GET", `/devices/${CONS}/next-job`);
+  check("require_ac holds the job while the machine is on battery", onBattery.status === 204, `status=${onBattery.status}`);
+
+  await beacon({ on_ac: true, idle_s: 600, load_1m: 0.2 });
+  const onMains = await json("GET", `/devices/${CONS}/next-job`);
+  check("and releases it once the machine is on mains",
+    onMains.status === 200 && onMains.body?.job_id === `smoke-cons-ac-${run}`, JSON.stringify(onMains.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: `smoke-cons-ac-${run}`, device_id: CONS, iter: 0, final: true, ok: true });
+
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-cons-load-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
+    targets: { device_id: CONS }, constraints: { max_load: 1 },
+  });
+  await beacon({ on_ac: true, idle_s: 600, load_1m: 9 });
+  const busy = await json("GET", `/devices/${CONS}/next-job`);
+  check("max_load holds the job while the machine is busy", busy.status === 204, `status=${busy.status}`);
+  await beacon({ on_ac: true, idle_s: 600, load_1m: 0.1 });
+  const quiet = await json("GET", `/devices/${CONS}/next-job`);
+  check("and releases it once the machine is quiet",
+    quiet.status === 200 && quiet.body?.job_id === `smoke-cons-load-${run}`, JSON.stringify(quiet.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: `smoke-cons-load-${run}`, device_id: CONS, iter: 0, final: true, ok: true });
+
+  // A window that cannot contain now, expressed so it stays false whenever the
+  // suite runs: two hours that end before the current hour begins.
+  const hour = new Date().getHours();
+  const from = (hour + 3) % 24;
+  const to = (hour + 5) % 24;
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-cons-window-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
+    targets: { device_id: CONS }, constraints: { window: { from, to } },
+  });
+  const outside = await json("GET", `/devices/${CONS}/next-job`);
+  check("a window that excludes now holds the job", outside.status === 204, `status=${outside.status} window=${from}-${to}`);
+
+  // The registry knows where it registered from, which is what tells "offline"
+  // apart from "on another network".
+  const devs = await json("GET", "/api/devices");
+  const row = (devs.body?.devices ?? []).find((d: any) => d.device_id === CONS);
+  check("registration records the network it came from", typeof row?.last_net === "string", JSON.stringify(row?.last_net));
+}
+
+// --- fan-out: host jobs, and one per distinct OS ---
+{
+  const OSPOOL = `smoke-os-${run}`;
+  const mk = (id: string, os: string) =>
+    json("POST", "/devices/register", { device_id: id, descriptor: { model: "P", os, ram_mb: 4000 }, pools: [OSPOOL], capabilities: ["benchmark"] });
+  await mk(`${OSPOOL}-a`, "android-13");
+  await mk(`${OSPOOL}-b`, "android-13");
+  await mk(`${OSPOOL}-c`, "android-15");
+
+  const distinct = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-os-distinct-${run}`, workload: "benchmark", executor: "device", backend: "synthetic",
+    fanout: { distinct: "os" }, targets: { pool: OSPOOL },
+  });
+  const kids = (distinct.body?.fanout ?? []) as string[];
+  check("fanout distinct:os makes one child per OS, not per device",
+    kids.length === 2, `${kids.length} children: ${JSON.stringify(kids)}`);
+
+  const badDistinct = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-os-bad-${run}`, workload: "benchmark", executor: "device",
+    fanout: { distinct: 7 }, targets: { pool: OSPOOL },
+  });
+  check("fanout.distinct must name a field", badDistinct.status === 400, `status=${badDistinct.status}`);
+
+  // Host fan-out used to be refused outright; a host child is pinned the same
+  // way a device child is and the executor already honours it.
+  const hostFan = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-os-host-${run}`, workload: "install", executor: "host",
+    app: { name: "x", build: "1", sha256: "a".repeat(64) },
+    fanout: { distinct: "os" }, targets: { pool: OSPOOL, executor: `never-${run}` },
+  });
+  check("host jobs can fan out too", (hostFan.body?.fanout ?? []).length === 2, JSON.stringify(hostFan.body));
+}
+
+// --- artifact pins ---
+
+// The reference scan reads job specs, results, schedules and templates. It
+// cannot see a visual baseline, whose whole purpose is to still exist months
+// later to diff against — which is precisely the artifact GC would have eaten.
+{
+  const body = new TextEncoder().encode(`pin-me-${run}`);
+  const sha = createHash("sha256").update(body).digest("hex");
+  const up = await fetch(`${BASE}/artifacts`, {
+    method: "POST", headers: { "content-type": "application/octet-stream", "x-artifact-name": `pin-${run}.bin` }, body,
+  });
+  check("artifact uploads for the pin test", up.status === 201, `status=${up.status}`);
+
+  const pin = await json("POST", `/api/artifacts/${sha}/pin`, { pinned: true, reason: "smoke" });
+  check("an artifact can be pinned", pin.status === 200 && pin.body?.pinned === true, JSON.stringify(pin.body));
+
+  const del = await json("DELETE", `/api/artifacts/${sha}`);
+  check("a pinned artifact refuses deletion", del.status === 409, `status=${del.status} ${JSON.stringify(del.body)}`);
+
+  const gc = await json("GET", "/api/artifacts/gc-candidates?days=0");
+  const offered = ((gc.body?.candidates ?? []) as { sha256: string }[]).some((c) => c.sha256 === sha);
+  check("and is never offered as a GC candidate", !offered, `${gc.body?.count} candidates`);
+
+  await json("POST", `/api/artifacts/${sha}/pin`, { pinned: false });
+  const del2 = await json("DELETE", `/api/artifacts/${sha}`);
+  check("unpinning releases it", del2.status === 200, `status=${del2.status} ${JSON.stringify(del2.body)}`);
+}
+
+// --- regression alerts ---
+
+// The sweep catches a fleet that stopped working. This catches one still
+// working and quietly getting worse, which is the failure a device lab exists
+// to find and the only one nothing here looked for.
+{
+  const REG = `smoke-reg-${run}`;
+  await json("POST", "/devices/register", {
+    device_id: REG, descriptor: { model: "Regressor", os: "android-14", ram_mb: 8000 },
+    pools: [], capabilities: ["benchmark"],
+  });
+
+  const post = async (i: number, tokS: number) => {
+    const jobId = `smoke-reg-${run}-${i}`;
+    await json("POST", "/jobs", {
+      schema: 1, job_id: jobId, workload: "benchmark", executor: "device", backend: "synthetic",
+      model: { name: "qwen-test", format: "gguf", quant: "Q4_K_M", sha256: "b".repeat(64) },
+      targets: { device_id: REG },
+    });
+    await json("POST", "/results", {
+      schema: 1, kind: "result", job_id: jobId, device_id: REG, iter: 0, final: true, ok: true,
+      metrics: { decode_tok_s: tokS },
+    });
+  };
+  // Five steady runs, then one that is a third slower on the same device with
+  // the same model and quant — the only comparison that means anything.
+  for (let i = 0; i < 5; i++) await post(i, 100);
+  const before = await json("POST", "/api/alerts/tick");
+  const quiet = ((before.body?.opened ?? []) as unknown[]).length;
+  await post(5, 66);
+  const after = await json("POST", "/api/alerts/tick");
+
+  const alerts = await json("GET", "/api/alerts");
+  const list = (alerts.body?.alerts ?? alerts.body ?? []) as { rule?: string; subject?: string }[];
+  const found = Array.isArray(list) && list.some((a) => a.rule === "benchmark-regressed" && String(a.subject).startsWith(REG));
+  check("a benchmark that falls against its own median raises an alert", found,
+    `opened_before=${quiet} opened_after=${JSON.stringify(after.body?.opened)} alerts=${JSON.stringify(list).slice(0, 300)}`);
+}
+
+// --- cold-start: parsing what the device actually said ---
+
+// This parser decides what number gets stored, so it is the piece that has to
+// be checkable without plugging in a phone. Every sample below is a shape a
+// real device emits; the one that matters most is the launch that did not
+// happen, because a parser returning 0 there reports an instant launch.
+{
+  const crlf = (s: string) => s.replace(/\n/g, "\r\n");
+
+  const cold = parseAmStart(crlf(
+    "Starting: Intent { act=android.intent.action.MAIN cmp=com.x/.MainActivity }\n" +
+    "Status: ok\nLaunchState: COLD\nActivity: com.x/.MainActivity\nTotalTime: 1043\nWaitTime: 1067\nComplete\n",
+  ));
+  check("am start: a cold launch parses through CRLF", cold.totalMs === 1043 && cold.launchState === "cold", JSON.stringify(cold));
+  check("am start: a cold launch is reportable", amStartProblem(cold) === null, String(amStartProblem(cold)));
+
+  const hot = parseAmStart(crlf("Status: ok\nLaunchState: HOT\nTotalTime: 96\nThisTime: 96\nWaitTime: 110\n"));
+  check("am start: a hot launch keeps the framework's own verdict", hot.launchState === "hot" && hot.thisMs === 96, JSON.stringify(hot));
+
+  // The case worth the whole module: nothing launched, and most builds print
+  // no TotalTime at all.
+  const brought = parseAmStart(crlf(
+    "Warning: Activity not started, its current task has been brought to the front\nStatus: ok\nComplete\n",
+  ));
+  check("am start: a task merely brought to the front has no launch time", brought.totalMs === null, JSON.stringify(brought));
+  check("am start: and is refused rather than reported as instant",
+    (amStartProblem(brought) ?? "").includes("no TotalTime"), String(amStartProblem(brought)));
+
+  const missing = parseAmStart(crlf("Error: Activity class {com.x/.Nope} does not exist.\n"));
+  check("am start: an unresolvable intent is an error, not a measurement",
+    (amStartProblem(missing) ?? "").includes("does not exist"), String(amStartProblem(missing)));
+
+  // A timeout can still print a TotalTime; the number describes a launch that
+  // did not finish, so the status has to win.
+  const timedOut = parseAmStart(crlf("Status: timeout\nTotalTime: 9999\n"));
+  check("am start: a timeout is refused even with a TotalTime present",
+    (amStartProblem(timedOut) ?? "").includes("timeout"), String(amStartProblem(timedOut)));
+
+  // Android 9 prints no LaunchState. Still measurable, just without ground truth.
+  const old9 = parseAmStart("Status: ok\nActivity: com.x/.MainActivity\nTotalTime: 512\nWaitTime: 530\n");
+  check("am start: a pre-Android-10 launch measures without a LaunchState",
+    old9.totalMs === 512 && old9.launchState === null && amStartProblem(old9) === null, JSON.stringify(old9));
+
+  check("am start: empty output is refused", amStartProblem(parseAmStart("")) !== null);
+  // A number in prose is not a field.
+  const decoy = parseAmStart(crlf("Status: ok\nNote: the TotalTime: 42 shown earlier was wrong\n"));
+  check("am start: a TotalTime mid-sentence is not read as a field", decoy.totalMs === null, JSON.stringify(decoy));
+}
+
+// --- network shaping: the vocabulary is refused, not defaulted ---
+
+// A typo'd profile that silently runs unshaped turns an offline test into a
+// test that proves nothing and still passes, which is the exact failure the
+// module exists to prevent.
+{
+  check("network: offline parses", parseNetworkProfile("offline").kind === "offline");
+  const delayed = parseNetworkProfile("offline-after-30s");
+  check("network: offline-after-Ns keeps the delay",
+    delayed.kind === "offline" && delayed.delayS === 30, JSON.stringify(delayed));
+  check("network: 3g parses", parseNetworkProfile("3g").kind === "3g");
+  let threw = false;
+  try { parseNetworkProfile("slowish"); } catch { threw = true; }
+  check("network: an unknown profile throws rather than running unshaped", threw);
 }
 
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);

@@ -7,7 +7,15 @@ import { getToken, mutate, useMutation } from "../mutate.js";
 import { useQuery } from "../router.js";
 import { Actions, Button, ConfirmButton, ErrorBox, Loaded, Pager, Panel, Pill, Search, bytes, clock } from "../ui.js";
 
-type Artifact = { sha256: string; name: string | null; size: number; created_at: string | null; on_disk: boolean; references: number };
+type Artifact = {
+  sha256: string; name: string | null; size: number; created_at: string | null;
+  on_disk: boolean; references: number;
+  /** Kept whatever the reference scan concludes. */
+  pinned: boolean; pin_reason: string | null;
+  /** Referenced by a baselines row rather than by any spec text, so its
+   *  reference count reads 0 while it is undeletable. */
+  baseline: boolean;
+};
 type ArtifactList = { page: number; per_page: number; total: number; pages: number; artifacts: Artifact[] };
 type GcList = { days: number; count: number; bytes: number; candidates: { sha256: string; name: string | null; size: number; created_at: string | null }[] };
 
@@ -182,6 +190,7 @@ export function Artifacts() {
                       <th>Name</th>
                       <th class="right">Size</th>
                       <th class="right">Refs</th>
+                      <th>Kept</th>
                       <th>On disk</th>
                       <th>Created</th>
                       <th>sha256</th>
@@ -191,6 +200,29 @@ export function Artifacts() {
                         <td>{a.name ?? <span class="faint">unnamed</span>}</td>
                         <td class="num">{bytes(a.size)}</td>
                         <td class="num">{a.references === 0 ? <span class="faint">0</span> : a.references}</td>
+                        <td>
+                          {/* Why a row with no references is still safe. Without
+                              this the only honest reading of "Refs 0" is "free to
+                              delete", which for a baseline is exactly wrong. */}
+                          {a.baseline ? (
+                            <span class="faint with-icon" title="Accepted visual baseline; accept a different shot to release it.">
+                              baseline
+                            </span>
+                          ) : (
+                            <label class="with-icon" title={a.pin_reason ?? "Keep this artifact whatever the reference scan concludes."}>
+                              <input
+                                type="checkbox"
+                                checked={a.pinned}
+                                onChange={async (e) => {
+                                  const pinned = (e.currentTarget as HTMLInputElement).checked;
+                                  await mutate("POST", `/api/artifacts/${a.sha256}/pin`, { pinned });
+                                  state.reload();
+                                }}
+                              />
+                              <span class="faint">pin</span>
+                            </label>
+                          )}
+                        </td>
                         <td>
                           {/* A row without its file is a download failure waiting
                               to happen for any job that references it. */}

@@ -22,6 +22,8 @@ import {
 } from "./targets.js";
 import { evalMatch } from "./match.js";
 import { keychainPassword, redact, KEYCHAIN_SERVICE } from "./secrets.js";
+import { parseAmStart, amStartProblem } from "./am-start.js";
+import { withNetwork, withNetworkAll, restoreAttached } from "./network-shape.js";
 
 const FLOWS_DIR = process.env.FLEET_FLOWS_DIR ?? path.resolve("flows");
 const MAESTRO = process.env.MAESTRO_BIN ?? path.join(os.homedir(), ".maestro/bin/maestro");
@@ -664,20 +666,33 @@ async function runUiTest(job: Job) {
     const outDir = mkdtempSync(path.join(os.tmpdir(), "fleet-junit-"));
     const report = path.join(outDir, "report.xml");
     let failedToRun = false;
+    // params.network, when the job carries one, is applied around the flow run
+    // and restored afterwards whatever happens inside it. A profile that cannot
+    // be applied fails the device's row by name rather than running the flow
+    // unshaped — an offline suite that quietly ran online is a pass that proves
+    // nothing.
+    let shapeError: string | undefined;
     try {
-      await exec(
-        MAESTRO,
-        ["--device", serial, "test", "--format", "junit", "--output", report,
-         ...(appId ? ["-e", `APP_ID=${appId}`] : []),
-         ...(creds
-           ? ["-e", `${creds.emailVar}=${creds.account}`, "-e", `${creds.passwordVar}=${creds.password}`]
-           : []),
-         flows],
-        { timeout: 600_000 },
-      );
-    } catch {
-      // Non-zero exit also just means failing flows; the report tells the truth.
-      failedToRun = !existsSync(report);
+      await withNetwork(job, target, async () => {
+        try {
+          await exec(
+            MAESTRO,
+            ["--device", serial, "test", "--format", "junit", "--output", report,
+             ...(appId ? ["-e", `APP_ID=${appId}`] : []),
+             ...(creds
+               ? ["-e", `${creds.emailVar}=${creds.account}`, "-e", `${creds.passwordVar}=${creds.password}`]
+               : []),
+             flows],
+            { timeout: 600_000 },
+          );
+        } catch {
+          // Non-zero exit also just means failing flows; the report tells the truth.
+          failedToRun = !existsSync(report);
+        }
+      });
+    } catch (e) {
+      shapeError = (e as Error).message.slice(0, 300);
+      failedToRun = true;
     }
 
     let passed = 0;
@@ -695,8 +710,9 @@ async function runUiTest(job: Job) {
     await postResult({
       job_id: job.job_id, device_id: serial, iter: 0,
       ok: failed === 0, test: { passed, failed, artifacts },
+      ...(shapeError ? { error: `params.network: ${shapeError}` } : {}),
     });
-    log(`ui-test on ${serial}: ${passed} passed / ${failed} failed`);
+    log(`ui-test on ${serial}: ${passed} passed / ${failed} failed${shapeError ? ` (network shaping: ${shapeError})` : ""}`);
   }
   } finally {
     if (granted) await releaseLocks(job.job_id);
@@ -849,6 +865,17 @@ async function runDrain(job: Job) {
   const deadline = t0 + durationS * 1000;
   let iter = 0;
   const alive = new Map(eligible.map((t) => [t.id, true]));
+  let allOk = true;
+  // params.network wraps the sampling window rather than the whole job: the app
+  // is already up when shaping starts, so `offline-after-<n>s` measures what it
+  // is for — an app that loses the network while running — instead of one that
+  // never had it. Restored on every exit path, including a throw mid-run.
+  //
+  // Worth knowing before pointing an offline profile at a drain job: this
+  // executor drives the device over adb, and taking a wifi-attached device
+  // offline would cut its own control channel. network-shape refuses that case
+  // outright rather than stranding the device.
+  await withNetworkAll(job, eligible, async () => {
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, Math.min(intervalS * 1000, deadline - Date.now())));
     iter += 1;
@@ -865,7 +892,6 @@ async function runDrain(job: Job) {
   if (gpxPath) for (const t of eligible) if (t.platform === "ios" && t.kind === "simulator")
     await exec("xcrun", ["simctl", "location", t.id, "clear"], { timeout: 15_000 }).catch(() => {});
 
-  let allOk = true;
   for (const t of eligible) {
     const s = start.get(t.id); const e = await batteryPct(t);
     const hours = (Date.now() - t0) / 3_600_000;
@@ -883,6 +909,7 @@ async function runDrain(job: Job) {
       error: ok ? undefined : `${appId} died during the drain run` });
     log(`drain ${appId} on ${t.id}: ${s}% -> ${e}% (${perHour?.toFixed(1) ?? "?"} %/h) ${ok ? "" : "APP DIED"}`);
   }
+  });
   await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
 }
 
@@ -933,6 +960,207 @@ async function runSoak(job: Job) {
       job_id: job.job_id, device_id: t.id, iter: 0, ok: survived,
       error: survived ? undefined : `${appId} died during the soak`,
     });
+  }
+  await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
+}
+
+const LAUNCH_STATES = ["cold", "warm", "hot"] as const;
+type LaunchState = (typeof LAUNCH_STATES)[number];
+
+/** The launcher activity `am start -n` needs, resolved the same way launchApp does. */
+async function androidLaunchComponent(target: Target, appId: string): Promise<string> {
+  const { stdout } = await exec(
+    ADB, ["-s", target.id, "shell", "cmd", "package", "resolve-activity", "--brief", appId],
+    { timeout: 15_000 },
+  );
+  const component = stdout.replace(/\r/g, "").trim().split("\n").pop()?.trim();
+  if (!component || !component.includes("/")) {
+    throw new Error(`no launcher activity for ${appId}: ${stdout.trim().slice(0, 160)}`);
+  }
+  return component;
+}
+
+/**
+ * Put the app into `state`, then launch it once and ask the framework how long
+ * that took.
+ *
+ * The three states are three different pieces of choreography, and the
+ * difference between them is the whole measurement:
+ *
+ *   cold -- force-stop first, so the process is gone and Android builds it from
+ *           nothing. This is the number a user feels after a reboot.
+ *   warm -- launch again with the process still around. No force-stop, by
+ *           definition: warm IS "the app is still in memory".
+ *   hot  -- HOME first, so the activity is merely backgrounded, then return to
+ *           it. The cheapest launch there is.
+ *
+ * `am start -W` blocks until the activity reports it is displayed and prints
+ * TotalTime, which is the framework's own time-to-first-frame. That is why this
+ * path exists and the iOS ones below do not: nothing in simctl or devicectl
+ * answers the same question.
+ */
+async function androidLaunchOnce(target: Target, component: string, appId: string, state: LaunchState) {
+  if (state === "cold") {
+    await exec(ADB, ["-s", target.id, "shell", "am", "force-stop", appId], { timeout: 20_000 });
+    // Force-stop returns before the process is reaped; measuring into that
+    // window times a launch that is still racing the teardown.
+    await new Promise((r) => setTimeout(r, 800));
+  } else if (state === "hot") {
+    await exec(ADB, ["-s", target.id, "shell", "input", "keyevent", "KEYCODE_HOME"], { timeout: 20_000 });
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+  const { stdout } = await exec(
+    ADB, ["-s", target.id, "shell", "am", "start", "-W", "-n", component],
+    { timeout: 90_000 },
+  );
+  return parseAmStart(stdout);
+}
+
+/**
+ * cold-start: how long the app takes to put its first frame on screen, N times
+ * over, in each launch state.
+ *
+ * One result row per launch — never a pre-averaged one. The collector computes
+ * p50 and p95 from the rows, split by launch_state, because a percentile mixing
+ * cold and hot launches describes nothing that ever happens to a person holding
+ * the phone.
+ *
+ * Android is the only platform this can measure honestly, and that is a
+ * statement about the tooling rather than about the app:
+ *
+ *   Android      -- `am start -W` reports TotalTime, the framework's own
+ *                   time-to-first-frame. Real measurement.
+ *   iOS simulator-- `simctl launch` returns once the process is SPAWNED. That
+ *                   is not time to first frame, it is a much smaller number
+ *                   that would sit in a field documented as time to first
+ *                   frame and be read as one. Reported as a failed row naming
+ *                   the limitation.
+ *   iOS device   -- devicectl has the same gap and one more: no force-stop by
+ *                   bundle id, so the cold state cannot even be established.
+ *
+ * The honest iOS path is on-device (XCTApplicationLaunchMetric in an XCUITest
+ * run, or the runner app reporting its own first frame) — it needs a runner
+ * change in another repo, not a number invented here.
+ */
+async function runColdStart(job: Job) {
+  const appId = (job.params?.app_id as string | undefined) ?? job.suite?.app_id;
+  if (!appId) throw new Error("cold-start job needs params.app_id");
+  const launches = Math.max(1, Number(job.params?.launches ?? 10));
+  const asked = job.params?.states;
+  const states = (Array.isArray(asked) ? asked.map(String) : [...LAUNCH_STATES]) as LaunchState[];
+  for (const s of states) {
+    if (!LAUNCH_STATES.includes(s)) {
+      throw new Error(`params.states has ${JSON.stringify(s)}; launch states are ${LAUNCH_STATES.join(", ")}`);
+    }
+  }
+  if (states.length === 0) throw new Error("params.states is empty; nothing to measure");
+
+  const platform = job.app?.platform ?? "android";
+  const targets = await selectTargets(job, (await listTargets()).filter((t) => t.platform === platform));
+  if (targets.length === 0) throw new Error(`no ${platform} targets matched this job`);
+
+  let allOk = true;
+  for (const target of targets) {
+    // iOS, both kinds: say what is missing and stop. A spawn time filed as
+    // launch_ms would be indistinguishable downstream from an Android
+    // time-to-first-frame, and every comparison drawn from the pair would be
+    // wrong in the app's favour.
+    if (target.platform === "ios") {
+      allOk = false;
+      const why = target.kind === "device"
+        ? "devicectl cannot time an iOS device's first frame (and cannot force-stop by bundle id, " +
+          "so the cold state cannot be established); measure it on-device with XCTApplicationLaunchMetric"
+        : "simctl launch returns when the process is spawned, not when the first frame is presented, " +
+          "so there is no honest time-to-first-frame here; measure it with XCTApplicationLaunchMetric in a ui-test job";
+      await postResult({ job_id: job.job_id, device_id: target.id, iter: 0, ok: false, error: why });
+      log(`cold-start on ${target.id}: unsupported — ${why}`);
+      continue;
+    }
+
+    if (!(await hasApp(target, appId))) {
+      await postResult({ job_id: job.job_id, device_id: target.id, iter: 0, ok: true, error: `skipped: ${appId} not installed` });
+      log(`cold-start on ${target.id}: skipped (${appId} not installed)`);
+      continue;
+    }
+
+    let component: string;
+    try {
+      component = await androidLaunchComponent(target, appId);
+    } catch (e) {
+      allOk = false;
+      await postResult({ job_id: job.job_id, device_id: target.id, iter: 0, ok: false, error: (e as Error).message.slice(0, 300) });
+      log(`cold-start on ${target.id}: ${(e as Error).message}`);
+      continue;
+    }
+
+    let iter = 0;
+    for (const state of states) {
+      // The lease is renewed per state, not per job: ten launches of a heavy
+      // app in three states outlives a default lease comfortably, and a swept
+      // job would be re-claimed and re-run on the same phone.
+      await postBeacon(job.job_id, target.id, {}).catch(() => {});
+
+      // One discarded warm-up launch per state, and it is not optional. Each
+      // state is defined by what the OS is holding when the launch starts, and
+      // the launch before the first measured one is what puts it there: the
+      // first "warm" launch after a cold start would otherwise be measured
+      // against a process that was never warm, and the first launch of the run
+      // as a whole carries one-time work (dexopt, first-run migrations) that no
+      // user pays twice.
+      try {
+        await androidLaunchOnce(target, component, appId, state);
+      } catch (e) {
+        allOk = false;
+        iter += 1;
+        await postResult({
+          job_id: job.job_id, device_id: target.id, iter, ok: false,
+          error: `${state} warm-up launch failed: ${(e as Error).message.slice(0, 240)}`,
+        });
+        log(`cold-start ${appId} on ${target.id}: ${state} warm-up failed, skipping the state`);
+        continue;
+      }
+
+      const measured: number[] = [];
+      for (let i = 0; i < launches; i++) {
+        iter += 1;
+        let parsed;
+        try {
+          parsed = await androidLaunchOnce(target, component, appId, state);
+        } catch (e) {
+          allOk = false;
+          await postResult({
+            job_id: job.job_id, device_id: target.id, iter, ok: false,
+            error: `${state} launch ${i + 1} failed: ${(e as Error).message.slice(0, 240)}`,
+          });
+          continue;
+        }
+        const problem = amStartProblem(parsed);
+        if (problem || parsed.totalMs === null) {
+          allOk = false;
+          await postResult({
+            job_id: job.job_id, device_id: target.id, iter, ok: false,
+            error: `${state} launch ${i + 1}: ${problem ?? "no TotalTime"}`,
+          });
+          continue;
+        }
+        // LaunchState (Android 10+) is the framework's verdict on what that
+        // launch actually was, and it beats our choreography's intent: a
+        // force-stopped app the OS still had warm really did launch warm, and
+        // filing it as cold is how a p95 stops meaning anything. When the
+        // platform is too old to say, the state we drove is the best available.
+        const reported = parsed.launchState ?? state;
+        if (parsed.launchState && parsed.launchState !== state) {
+          log(`cold-start ${appId} on ${target.id}: asked for ${state}, the framework reported ${parsed.launchState} — filing it as ${parsed.launchState}`);
+        }
+        measured.push(parsed.totalMs);
+        await postResult({
+          job_id: job.job_id, device_id: target.id, iter, ok: true,
+          metrics: { launch_ms: parsed.totalMs, launch_state: reported },
+        });
+      }
+      const mean = measured.length > 0 ? Math.round(measured.reduce((a, b) => a + b, 0) / measured.length) : null;
+      log(`cold-start ${appId} on ${target.id}: ${state} — ${measured.length}/${launches} launches, mean ${mean ?? "?"} ms`);
+    }
   }
   await postResult({ job_id: job.job_id, device_id: `host:${NAME}`, iter: 0, final: true, ok: allOk });
 }
@@ -1396,12 +1624,19 @@ async function runWebShots(job: Job) {
     const started = Date.now();
     let detail = "";
     try {
+      // Device captures honour params.network: shaping is applied around the
+      // capture and restored after it, including when the capture throws. A
+      // profile the target cannot take throws out of here into the catch below,
+      // so the profile's failure is what the pages report — not a clean-looking
+      // capture taken under conditions nobody asked for.
       if (entry.target?.kind === "android") {
-        detail = await withTimeout(
-          captureAndroidShots(entry.target.id, manifest, url, outDir), timeoutS, `android capture on ${entry.target.id}`);
+        const t: Target = { id: entry.target.id, platform: "android", kind: "device" };
+        detail = await withNetwork(job, t, () => withTimeout(
+          captureAndroidShots(t.id, manifest, url, outDir), timeoutS, `android capture on ${t.id}`));
       } else if (entry.target?.kind === "ios-sim") {
-        detail = await withTimeout(
-          captureSimSafariShots(entry.target.id, manifest, url, outDir), timeoutS, `simulator capture on ${entry.target.id}`);
+        const t: Target = { id: entry.target.id, platform: "ios", kind: "simulator" };
+        detail = await withNetwork(job, t, () => withTimeout(
+          captureSimSafariShots(t.id, manifest, url, outDir), timeoutS, `simulator capture on ${t.id}`));
       } else {
         await exec(
           "npx",
@@ -1741,8 +1976,44 @@ async function reportAttached() {
   }
 }
 
+/**
+ * Undo any network shaping an earlier run of this executor left behind, before
+ * a single job is claimed.
+ *
+ * The failure this prevents: a phone whose wifi was disabled by a job that
+ * never reached its restore -- a reboot, an OOM, a pkill aimed at something
+ * else -- looks exactly like a phone that has died. It vanishes from the
+ * dashboard, fails every job it is handed, and nothing anywhere names the
+ * cause. Restoring at startup means the worst case is one log line instead of
+ * an afternoon.
+ *
+ * Only devices this executor is allowed to touch, decided by the same
+ * fleetOwned rule as presence and selection: a scratch phone somebody has
+ * deliberately taken off the network is not ours to reconnect.
+ */
+async function restoreNetworkOnStartup() {
+  try {
+    const attached = await listTargets();
+    const sims = attached.some((t) => t.platform === "ios") ? await simctlDevices() : null;
+    const owned: Target[] = [];
+    for (const t of attached) if (await fleetOwnedTarget(t, sims)) owned.push(t);
+    const repaired = await restoreAttached(owned);
+    log(
+      repaired.length > 0
+        ? `network: repaired ${repaired.length} device(s) left shaped by an earlier run: ${repaired.join(", ")}`
+        : `network: ${owned.length} attached device(s), none needed repair`,
+    );
+  } catch (e) {
+    // Never a reason not to start working: an executor that refuses to claim
+    // because a restore sweep failed is a worse outage than the one it is
+    // guarding against.
+    log(`network: startup restore sweep failed: ${(e as Error).message.slice(0, 200)}`);
+  }
+}
+
 async function main() {
   log(`polling ${BASE} (flows: ${FLOWS_DIR})`);
+  await restoreNetworkOnStartup();
   // The dashboard calls a device online for ONLINE_S seconds after it was last
   // seen. Refreshing on a timer rather than per poll keeps presence steady
   // regardless of how long a long-poll blocks or how long a job runs.
@@ -1767,6 +2038,7 @@ async function main() {
       else if (job.workload === "ui-test") await runUiTest(job);
       else if (job.workload === "soak") await runSoak(job);
       else if (job.workload === "drain") await runDrain(job);
+      else if (job.workload === "cold-start") await runColdStart(job);
       else if (job.workload === "web-test") await runWebTest(job);
       else if (job.workload === "web-shots") await runWebShots(job);
       else if (job.workload === "web-audit") await runWebAudit(job);
