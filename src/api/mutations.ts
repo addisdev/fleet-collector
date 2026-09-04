@@ -330,10 +330,14 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
 
   // --- artifacts (plan D4) ---
 
-  /** Artifacts no job spec or result references. The candidates are listed
-   *  before anything is deleted, because a hash the dashboard cannot see a
-   *  reference to may still be referenced by something it never indexed. */
-  function gcCandidates(olderThanDays: number) {
+  /** Everything that makes an artifact un-collectable: a textual reference in
+   *  something the collector stores, or a pin.
+   *
+   *  Baselines are the case a text scan cannot reach. An accepted visual
+   *  baseline is referenced by a row in `baselines`, not by any job spec, and
+   *  its entire purpose is to still exist months later to diff against — so
+   *  the scan would have offered every one of them for collection. */
+  function protectedShas(): Set<string> {
     const referenced = new Set<string>();
     for (const { blob } of [
       ...(db.prepare("SELECT spec AS blob FROM jobs").all() as { blob: string }[]),
@@ -343,6 +347,18 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
     ]) {
       for (const sha of sha256Refs(blob)) referenced.add(sha);
     }
+    for (const b of db.prepare("SELECT sha256 FROM baselines").all() as { sha256: string }[])
+      referenced.add(b.sha256);
+    for (const a of db.prepare("SELECT sha256 FROM artifacts WHERE pinned = 1").all() as { sha256: string }[])
+      referenced.add(a.sha256);
+    return referenced;
+  }
+
+  /** Artifacts nothing references and nobody pinned. The candidates are listed
+   *  before anything is deleted, because a hash the dashboard cannot see a
+   *  reference to may still be referenced by something it never indexed. */
+  function gcCandidates(olderThanDays: number) {
+    const referenced = protectedShas();
     return (
       db
         .prepare(
@@ -366,10 +382,34 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
     };
   });
 
+  /** Pin or unpin. A pin is an operator saying "keep this whatever the scan
+   *  thinks"; the reason is stored because a pin with no reason is one nobody
+   *  will ever dare remove. */
+  app.post("/api/artifacts/:sha256/pin", async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const { sha256 } = req.params as { sha256: string };
+    if (!/^[a-f0-9]{64}$/.test(sha256)) return reply.code(400).send({ error: "bad sha256" });
+    const body = (req.body ?? {}) as { pinned?: boolean; reason?: string };
+    const pinned = body.pinned !== false;
+    const changed = db
+      .prepare("UPDATE artifacts SET pinned = ?, pin_reason = ? WHERE sha256 = ?")
+      .run(pinned ? 1 : 0, pinned ? (body.reason ?? "pinned from the dashboard") : null, sha256).changes;
+    if (!changed) return reply.code(404).send({ error: "not found" });
+    announce({ type: "artifact", sha256, event: pinned ? "pin" : "unpin" });
+    return { ok: true, sha256, pinned };
+  });
+
   app.delete("/api/artifacts/:sha256", async (req, reply) => {
     if (!requireToken(req, reply)) return;
     const { sha256 } = req.params as { sha256: string };
     if (!/^[a-f0-9]{64}$/.test(sha256)) return reply.code(400).send({ error: "bad sha256" });
+
+    const pin = db.prepare("SELECT pinned, pin_reason FROM artifacts WHERE sha256 = ?").get(sha256) as
+      | { pinned: number; pin_reason: string | null } | undefined;
+    if (pin?.pinned)
+      return reply.code(409).send({
+        error: `pinned${pin.pin_reason ? `: ${pin.pin_reason}` : ""}; unpin it first if you really mean to delete it`,
+      });
 
     // Refuse while anything still points at it. An artifact is content, not a
     // cache entry: deleting one a queued job needs makes that job fail at
@@ -381,6 +421,17 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
       return reply
         .code(409)
         .send({ error: `still referenced by ${referencedBy.length} job(s), e.g. ${referencedBy[0].job_id}` });
+
+    // A baseline is referenced by a row, not by any spec text, so the scan
+    // above cannot see it. Deleting one leaves a visual suite diffing against
+    // nothing and reporting every page as changed.
+    const baseline = db.prepare("SELECT suite, page, profile FROM baselines WHERE sha256 = ?").get(sha256) as
+      | { suite: string; page: string; profile: string } | undefined;
+    if (baseline)
+      return reply.code(409).send({
+        error: `accepted visual baseline for ${baseline.suite}/${baseline.page} (${baseline.profile}); ` +
+          "accept a different shot first",
+      });
 
     const removed = db.prepare("DELETE FROM artifacts WHERE sha256 = ?").run(sha256).changes;
     if (!removed) return reply.code(404).send({ error: "not found" });

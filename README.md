@@ -86,6 +86,8 @@ so it never touches a real fleet's history.
 | `ui-test` | host | Maestro flows or an XCUITest bundle per device, JUnit parsed back into results |
 | `web-test` / `web-shots` | host | Playwright suites, and visual-regression captures diffed against an accepted baseline — including on real phone screens |
 | `web-audit` / `web-unfurl` | host | Crawl-and-audit with a real browser; and the raw HTML that link-preview bots actually see, which is a different answer |
+| `thermal` | device | The same benchmark run back to back for a quarter hour, so the answer is a curve: does the cold number survive the device getting warm |
+| `cold-start` | host | Launch the installed build from cold, warm and hot; p50 and p95 per state, per device |
 | `drain` / `soak` | host | Battery curve under a replayed GPX track; and whether a runner is still alive hours later |
 | `archive` / `digest` | host | Pull store reviews and Search Console data; then have the shelf summarize its own reviews using its own models |
 

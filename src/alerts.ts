@@ -29,7 +29,35 @@ export const THRESHOLDS = {
   lowBatteryPct: env("FLEET_ALERT_LOW_BATTERY_PCT", 15),
   dbBytes: env("FLEET_ALERT_DB_BYTES", 2 * 1024 * 1024 * 1024),
   logBytes: env("FLEET_ALERT_LOG_BYTES", 200 * 1024 * 1024),
+  // A metric has regressed when it moves this far against its own recent
+  // median on the same device. Percent, not absolute: the shelf spans a 2016
+  // phone and current silicon, and one threshold in tok/s would be noise on
+  // one and silence on the other.
+  regressionPct: env("FLEET_ALERT_REGRESSION_PCT", 10),
+  regressionDays: env("FLEET_ALERT_REGRESSION_DAYS", 7),
+  // Below this many prior runs there is no median worth trusting, and a new
+  // device would alarm on its second result forever.
+  regressionMinSamples: env("FLEET_ALERT_REGRESSION_MIN_SAMPLES", 4),
 };
+
+/**
+ * A metric watched for regression: where it lives, which direction is bad, and
+ * what makes two runs comparable. The comparison key matters more than the
+ * threshold — a benchmark is only comparable to itself on the same device with
+ * the same model and quant, and comparing across those is how a "regression"
+ * turns out to be a different model.
+ */
+const WATCHED = [
+  { workload: "benchmark", metric: "decode_tok_s", worse: "lower" as const, label: "decode throughput" },
+  { workload: "cold-start", metric: "launch_ms", worse: "higher" as const, label: "cold launch time" },
+  { workload: "batch", metric: "top1_pct", worse: "lower" as const, label: "top-1 accuracy" },
+];
+
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
 
 /** Every rule, evaluated against the current database. */
 export function evaluate(now = new Date(), sizes: { dbBytes: number; logBytes: number }): Finding[] {
@@ -113,6 +141,78 @@ export function evaluate(now = new Date(), sizes: { dbBytes: number; logBytes: n
         severity: "warning",
         message: `${j.workload} job ${j.job_id} has been claimed by ${j.claimed_by ?? "?"} for ${Math.round(j.held_s / 60)} min with no results`,
       });
+  }
+
+  // --- regressions ---
+  //
+  // The sweep and the stuck rule catch a fleet that has stopped working. This
+  // catches one that is still working and quietly getting worse, which is the
+  // failure a device lab exists to find and the only one nothing here looked
+  // for. The results table already holds the history; nothing new is recorded.
+  for (const w of WATCHED) {
+    const rows = db
+      .prepare(
+        `SELECT r.device_id, r.payload, j.spec,
+                CAST(strftime('%s','now') - strftime('%s', r.created_at) AS INTEGER) AS age_s
+         FROM results r JOIN jobs j ON j.job_id = r.job_id
+         WHERE j.workload = ?
+           AND json_extract(r.payload, '$.final') = 1
+           AND json_extract(r.payload, '$.ok') IS NOT 0
+           AND json_extract(r.payload, '$.metrics.' || ?) IS NOT NULL
+           AND r.created_at >= datetime('now', ?)
+         -- rowid breaks the tie. SQLite stores seconds, and several results
+         -- landing in the same second is normal, so created_at alone leaves
+         -- "which run is the latest" undefined exactly when it matters.
+         ORDER BY r.created_at DESC, r.rowid DESC`,
+      )
+      .all(w.workload, w.metric, `-${THRESHOLDS.regressionDays + 1} days`) as {
+      device_id: string; payload: string; spec: string; age_s: number;
+    }[];
+
+    // Grouped by everything that has to match for two numbers to mean the same
+    // thing, then split into "the newest run" and "what it used to be".
+    const groups = new Map<string, { latest?: number; history: number[]; device: string; label: string }>();
+    for (const r of rows) {
+      const metrics = (parse<Record<string, unknown>>(r.payload, {}).metrics ?? {}) as Record<string, unknown>;
+      const value = Number(metrics[w.metric]);
+      if (!Number.isFinite(value)) continue;
+      const spec = parse<Record<string, unknown>>(r.spec, {});
+      const model = (spec.model ?? {}) as { name?: string; quant?: string };
+      const parts = [r.device_id, w.metric, model.name ?? "", model.quant ?? "", String(spec.backend ?? "")];
+      const key = parts.join("|");
+      const g = groups.get(key) ?? {
+        history: [], device: r.device_id,
+        label: [model.name, model.quant, spec.backend].filter(Boolean).join(" "),
+      };
+      // Rows arrive newest first, so the first one seen is the run under test.
+      if (g.latest === undefined) g.latest = value;
+      else g.history.push(value);
+      groups.set(key, g);
+    }
+
+    for (const [, g] of groups) {
+      if (g.latest === undefined || g.history.length < THRESHOLDS.regressionMinSamples) continue;
+      const baseline = median(g.history);
+      if (!Number.isFinite(baseline) || baseline === 0) continue;
+      const deltaPct = ((g.latest - baseline) / baseline) * 100;
+      const regressed = w.worse === "lower"
+        ? deltaPct <= -THRESHOLDS.regressionPct
+        : deltaPct >= THRESHOLDS.regressionPct;
+      if (!regressed) continue;
+      const suffix = g.label ? ` (${g.label})` : "";
+      out.push({
+        rule: `${w.workload}-regressed`,
+        // Keyed on the same thing the comparison was, so reconcile treats one
+        // drifting device-and-model pair as one alert rather than a new one
+        // every night.
+        subject: `${g.device}|${w.metric}|${g.label}`,
+        severity: "warning",
+        message:
+          `${w.label} on ${g.device}${suffix} is ${Math.abs(deltaPct).toFixed(0)}% ` +
+          `${w.worse === "lower" ? "below" : "above"} its ${THRESHOLDS.regressionDays}-day median ` +
+          `(${g.latest.toFixed(1)} vs ${baseline.toFixed(1)}, ${g.history.length} prior runs)`,
+      });
+    }
   }
 
   // --- schedules ---

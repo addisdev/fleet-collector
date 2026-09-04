@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS devices (
   -- What the agent says it can run; see the migration below for why NULL is
   -- permissive rather than empty.
   capabilities   TEXT,
+  -- /24 prefix the agent last registered from; see the migration below.
+  last_net       TEXT,
   -- The device's name. Not a nickname beside its id: the id is what the runner
   -- reports and what job specs pin, and this is what a person calls the thing.
   name           TEXT,
@@ -227,6 +229,14 @@ for (const [column, ddl] of [
   // published. That is precisely backwards for a revert. A counter has neither
   // problem.
   ["publish_seq", "publish_seq INTEGER"],
+  // A pin says "never collect this, whatever the reference scan concludes".
+  // The scan reads job specs, results, schedules and templates — it cannot see
+  // an accepted visual baseline, whose whole job is to still be there in six
+  // months to diff against. Once build and model-convert start producing
+  // artifacts nightly, GC stops being hypothetical and that blind spot becomes
+  // a deleted baseline and a visual suite with nothing to compare to.
+  ["pinned", "pinned INTEGER NOT NULL DEFAULT 0"],
+  ["pin_reason", "pin_reason TEXT"],
 ] as const) {
   if (!artifactColumns.has(column)) db.exec(`ALTER TABLE artifacts ADD COLUMN ${ddl}`);
 }
@@ -265,6 +275,13 @@ for (const [column, ddl] of [
   // NULL means an agent registered before capabilities existed: it is offered
   // everything, exactly as it was before, rather than silently offered nothing.
   ["capabilities", "capabilities TEXT"],
+  // The network the agent last registered from, as a /24 prefix. Once agents
+  // roam, "six devices offline" and "six devices on another network" look
+  // identical in the registry and mean opposite things — the dashboard
+  // screenshots taken from the wrong LAN read as an abandoned fleet for
+  // exactly this reason. A prefix, not the full address: enough to tell one
+  // place from another, not a log of where a laptop has been.
+  ["last_net", "last_net TEXT"],
 ] as const) {
   if (!deviceColumns.has(column)) db.exec(`ALTER TABLE devices ADD COLUMN ${ddl}`);
 }

@@ -56,6 +56,33 @@ const WORKLOADS: Record<string, { executor: "device" | "host"; blurb: string; sp
     blurb: "Leave the app running overnight; the beacon reports process-alive.",
     spec: () => ({ app: { name: "", build: "", sha256: "" } }),
   },
+  thermal: {
+    executor: "device",
+    blurb: "Benchmark back to back for a fixed duration; the answer is a curve, not a number.",
+    spec: () => ({
+      backend: "synthetic",
+      // Fifteen minutes is long enough for a phone to reach the state a pocket
+      // puts it in, which is the whole question this workload answers.
+      params: { prompt_tokens: 512, gen_tokens: 128, duration_s: 900 },
+      lease: { ttl_s: 1200 },
+      // A device on battery throttles for a reason that has nothing to do with
+      // heat, which would make the curve unreadable.
+      constraints: { require_charging: true },
+    }),
+  },
+  "cold-start": {
+    executor: "host",
+    blurb: "Launch the installed build from cold, warm and hot; report p50 and p95 per state.",
+    spec: () => ({
+      app: { name: "", build: "", sha256: "" },
+      params: { app_id: "", launches: 10, states: ["cold", "warm", "hot"] },
+    }),
+  },
+  "self-check": {
+    executor: "host",
+    blurb: "The host inspects itself: disk, tool versions, clock drift, agents loaded.",
+    spec: () => ({ targets: { executor: "" } }),
+  },
 };
 
 function stamp(workload: string) {

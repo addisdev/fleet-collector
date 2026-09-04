@@ -9,6 +9,7 @@ type DeviceRow = {
   pools: string;
   pools_override: string | null;
   capabilities: string | null;
+  last_net: string | null;
   name: string | null;
   notes: string | null;
   last_seen: string;
@@ -16,7 +17,7 @@ type DeviceRow = {
   age_s: number | null;
 };
 
-const DEVICE_SELECT = `SELECT device_id, descriptor, pools, pools_override, capabilities, name, notes,
+const DEVICE_SELECT = `SELECT device_id, descriptor, pools, pools_override, capabilities, last_net, name, notes,
                               last_seen, last_beacon, ${AGE("last_seen")} AS age_s
                        FROM devices`;
 
@@ -36,6 +37,7 @@ function shapeDevice(d: DeviceRow) {
     // null, not [], for an agent that predates capabilities: the dashboard says
     // "all" for that case rather than showing it as able to run nothing.
     capabilities: deviceCapabilities(d),
+    last_net: d.last_net,
     platform: /ios|iphone|ipad/i.test(String(descriptor.os ?? "")) ? "ios" : "android",
     simulator: isSimulator(descriptor, d.device_id),
     status: deviceStatus(d.age_s),

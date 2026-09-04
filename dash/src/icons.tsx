@@ -53,6 +53,17 @@ const PATHS = {
       <path d="M8 7v3.5" />
     </>
   ),
+  stopwatch: (
+    <>
+      <circle cx="8" cy="9.25" r="4.75" />
+      <path d="M8 9.25V6.5M6.25 1.75h3.5M12.25 4.75l1 1" />
+    </>
+  ),
+  heartbeat: (
+    <>
+      <path d="M1.75 8h3l1.5-3.5L9 11.5l1.5-3.5h3.75" />
+    </>
+  ),
   install: (
     <>
       <path d="M8 2v8M4.5 6.5L8 10l3.5-3.5" />
@@ -181,6 +192,9 @@ const WORKLOAD_ICON: Record<string, IconName> = {
   pipeline: "pipeline",
   archive: "archive",
   digest: "digest",
+  thermal: "thermal",
+  "cold-start": "stopwatch",
+  "self-check": "heartbeat",
 };
 
 /** The workload's name with its icon, for job tables. */

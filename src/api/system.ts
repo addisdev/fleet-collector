@@ -251,14 +251,19 @@ export function registerSystem(app: FastifyInstance) {
     const total = (db.prepare(`SELECT COUNT(*) AS n FROM artifacts${sql}`).get(...params) as { n: number }).n;
     const rows = db
       .prepare(
-        `SELECT sha256, name, size, created_at, app, build, platform, published_at
+        `SELECT sha256, name, size, created_at, app, build, platform, published_at, pinned, pin_reason
            FROM artifacts${sql}
           ORDER BY COALESCE(publish_seq, rowid) DESC LIMIT ? OFFSET ?`,
       )
       .all(...params, per_page, offset) as {
         sha256: string; name: string | null; size: number; created_at: string;
         app: string | null; build: string | null; platform: string | null; published_at: string | null;
+        pinned: number; pin_reason: string | null;
       }[];
+
+    const baselineShas = new Set(
+      (db.prepare("SELECT sha256 FROM baselines").all() as { sha256: string }[]).map((b) => b.sha256),
+    );
 
     // One pass over recent specs and result payloads builds the whole
     // reference map; the alternative is a LIKE scan per artifact.
@@ -283,6 +288,13 @@ export function registerSystem(app: FastifyInstance) {
         published_at: a.published_at ? iso(a.published_at) : null,
         on_disk: existsSync(path.join(ARTIFACT_DIR, a.sha256)),
         references: refs.get(a.sha256) ?? 0,
+        pinned: !!a.pinned,
+        pin_reason: a.pin_reason,
+        // A baseline reference is a row, not text in a spec, so it never shows
+        // up in the reference count. Surfaced separately rather than folded in,
+        // because "referenced by 0 things but undeletable" is the confusing
+        // state this is here to explain.
+        baseline: baselineShas.has(a.sha256),
       })),
     };
   });
