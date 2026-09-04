@@ -13,7 +13,7 @@
 // directory, its own artifact store, and a port nobody is using.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,7 +81,47 @@ if (!existsSync(path.join(ROOT, "dash/node_modules"))) {
   failed = true;
 }
 
-// --- 3. the collector, on its own data ----------------------------------
+// --- 3. the icon set keeps up with the workloads -------------------------
+// WORKLOAD_ICON says it covers every workload the collector accepts, and
+// nothing but this step enforces it. The dashboard deliberately does not
+// import collector types, so the two lists can only be compared as text —
+// which means a regex that stops matching has to fail the step, not pass it
+// quietly, or the check silently stops checking.
+step("every workload has an icon");
+{
+  const literal = (src: string, re: RegExp, what: string) => {
+    const m = src.match(re);
+    if (!m) throw new Error(`cannot find ${what} — this check needs updating`);
+    return m[1];
+  };
+  try {
+    const workloads = literal(
+      await readFile(path.join(ROOT, "src/server.ts"), "utf8"),
+      /const WORKLOADS = new Set\(\[([\s\S]*?)\]\)/,
+      "WORKLOADS in src/server.ts",
+    );
+    const icons = literal(
+      await readFile(path.join(ROOT, "dash/src/icons.tsx"), "utf8"),
+      /const WORKLOAD_ICON: Record<string, IconName> = \{([\s\S]*?)\n\};/,
+      "WORKLOAD_ICON in dash/src/icons.tsx",
+    );
+    const accepted = new Set([...workloads.matchAll(/"([a-z][a-z-]*)"/g)].map((m) => m[1]));
+    const drawn = new Set([...icons.matchAll(/^\s*"?([a-z][a-z-]*)"?\s*:/gm)].map((m) => m[1]));
+    if (accepted.size === 0 || drawn.size === 0) throw new Error("parsed an empty list — this check needs updating");
+
+    const missing = [...accepted].filter((w) => !drawn.has(w));
+    const stale = [...drawn].filter((w) => !accepted.has(w));
+    if (missing.length) console.error(`  no icon for: ${missing.join(", ")}`);
+    if (stale.length) console.error(`  icon for a workload the collector does not accept: ${stale.join(", ")}`);
+    if (missing.length || stale.length) failed = true;
+    else console.log(`  ok — ${accepted.size} workloads, ${accepted.size} icons`);
+  } catch (e) {
+    failed = true;
+    console.error(`  ${(e as Error).message}`);
+  }
+}
+
+// --- 4. the collector, on its own data ----------------------------------
 step("smoke (against a throwaway collector)");
 const dir = await mkdtemp(path.join(tmpdir(), "fleet-test-"));
 const port = await freePort();
