@@ -1,115 +1,30 @@
-# fleet-collector
+# fleet-collector has moved
 
-The brain of **Fleet Runner**: a personal device lab that turns a shelf of old
-phones into something you can send work to. It holds the device registry, the
-job queue, the artifact store, the results database, and the dashboard.
+This code now lives in **[addisdev/fleet-runner](https://github.com/addisdev/fleet-runner)**,
+in the [`collector/`](https://github.com/addisdev/fleet-runner/tree/main/collector) directory.
 
-One queued job can install a build on every attached device, run a Maestro or
-XCUITest suite across them, benchmark llama.cpp on real silicon, classify a
-few hundred images through Core ML and LiteRT, screenshot a website on two
-real phones and diff it against a baseline, or drain a battery on purpose and
-plot the curve. The runners are separate apps —
-[iOS](https://github.com/addisdev/fleet-runner-ios) and
-[Android](https://github.com/addisdev/fleet-runner-android) — that speak a
-shared JSON protocol, not shared code.
+The brain: device registry, job queue with leases, artifact store, results database, scheduler, alert engine, and the dashboard.
 
-Node + Fastify + SQLite in WAL mode. No build step for the server, no broker,
-no cloud.
+## Why
 
-![The results screen: llama.cpp benchmark numbers from a real phone](docs/img/results.png)
+Fleet Runner was four repositories: a collector, two phone runners, and later a
+desktop runner. They share no code, only a JSON protocol — and that protocol is
+the thing that changes.
 
-## How it fits together
+A metric name is declared in the collector's schema and mirrored by hand in
+three runners. A capability list is declared by an agent and enforced by the
+queue. A new workload touches a runner, the schema, a results endpoint and a
+dashboard view. Each of those is one change that has to land in several places
+at once, and across repositories it landed as several pull requests that could
+each merge alone.
 
-```mermaid
-flowchart LR
-    subgraph shelf["the shelf"]
-        A["Android runner<br/><i>foreground service</i>"]
-        I["iOS runner<br/><i>SwiftUI app</i>"]
-    end
-    subgraph host["a Mac with the devices plugged in"]
-        X["host executor<br/><i>adb · Maestro · simctl · Playwright</i>"]
-    end
-    C["<b>collector</b><br/>queue · registry · leases<br/>artifacts · results · scheduler"]
-    D["dashboard<br/><i>Preact, same process</i>"]
+That drift was not hypothetical: an eval's accuracy once rode in a field named
+`decode_tok_s` because vision had no field of its own, and no query can
+reproduce that report's numbers today.
 
-    A -- "long-poll, claim, report" --> C
-    I -- "long-poll, claim, report" --> C
-    X -- "claims host jobs" --> C
-    X -- "drives from outside" --> shelf
-    C --- D
-```
+## Nothing was lost
 
-Two kinds of job. **Device jobs** are claimed by the runner app on the phone
-itself — benchmarks, batch inference, vision evals. **Host jobs** are claimed
-by an executor on a Mac and drive a device from outside, because installing an
-APK or tapping through a UI test is not something an app can do to itself.
-
-## Run it
-
-Needs Node 22 or newer. Nothing else.
-
-```bash
-npm install
-npm start                # collector + dashboard on http://127.0.0.1:8788
-```
-
-That is a working collector against an empty database. To see it do something,
-build a runner from one of the app repos, point it at this address, and enqueue
-a job:
-
-```bash
-curl -X POST http://127.0.0.1:8788/jobs -H 'content-type: application/json' -d '{
-  "schema": 1, "job_id": "bench-1", "workload": "benchmark",
-  "executor": "device", "backend": "synthetic",
-  "params": { "prompt_tokens": 256, "gen_tokens": 64, "measure_iters": 3 },
-  "targets": { "pool": "ml-capable" }
-}'
-```
-
-```bash
-npm test                 # typecheck, build the dashboard, run the suite
-npm run executor         # host executor: claims host jobs, drives devices
-npm run dash:dev         # dashboard dev server, proxying /api
-```
-
-`npm test` starts its own collector on a spare port with a temporary database,
-so it never touches a real fleet's history.
-
-## The workloads
-
-| Workload | Runs on | What it does |
-|---|---|---|
-| `benchmark` | device | Prefill/decode tok/s via llama.cpp, or a synthetic SHA-256 backend that is identical on both platforms so old hardware still produces comparable numbers |
-| `batch` / `pipeline` | device | Real generation over a set of inputs, or staged work across several devices |
-| `vision-eval` | device | Top-1/top-5 accuracy and per-image latency for an image classifier, via Core ML or LiteRT |
-| `install` | host | One artifact onto every attached device — `adb install`, or `simctl`/`devicectl` |
-| `ui-test` | host | Maestro flows or an XCUITest bundle per device, JUnit parsed back into results |
-| `web-test` / `web-shots` | host | Playwright suites, and visual-regression captures diffed against an accepted baseline — including on real phone screens |
-| `web-audit` / `web-unfurl` | host | Crawl-and-audit with a real browser; and the raw HTML that link-preview bots actually see, which is a different answer |
-| `drain` / `soak` | host | Battery curve under a replayed GPX track; and whether a runner is still alive hours later |
-| `archive` / `digest` | host | Pull store reviews and Search Console data; then have the shelf summarize its own reviews using its own models |
-
-Full reference, including every parameter and the failure modes worth knowing:
-**[docs/operations.md](docs/operations.md)**.
-
-## Status and threat model
-
-Built and running: every phase of the original plan, a dashboard with live
-updates over SSE, an alert engine, and a scheduler. The first real payload was
-an [on-device plant-ID evaluation](evals/greenfolio-plant-id.md) across both
-platforms — 77% top-1 at 7 ms per image on a phone, which answered a product
-question that had been guesswork.
-
-**There is no authentication, by design.** The collector is reachable on a home
-LAN and is meant to stay that way; anyone who can reach it can enqueue a job.
-`FLEET_DASH_TOKEN` guards the dashboard's mutations, but that is a speed bump
-against a stray browser tab, not an access control — `POST /jobs` stays open so
-`curl` and CI keep working. Do not put this on the internet. If you want to,
-the honest starting point is that every endpoint would need to be re-thought,
-not that a token would need to be added.
-
-## License
-
-MIT — see [LICENSE](LICENSE). Third-party components and the licensing of the
-models and datasets used by the evals are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Every commit came across with `git subtree`, so the full history and every
+author survive in the mono repo, and `git log --follow` works through the move.
+This repository is archived and read-only; it stays up because its URL appears
+in old pull requests and in write-ups that should keep resolving.
