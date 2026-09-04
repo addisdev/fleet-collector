@@ -4,6 +4,25 @@
 import path from "node:path";
 
 export const PORT = Number(process.env.FLEET_PORT ?? 8788);
+
+/**
+ * Which addresses the collector answers on. Comma-separated; the default is
+ * every interface, which is what it has always done and what a LAN-only fleet
+ * wants.
+ *
+ * It is a list because the useful posture has two entries and no wildcard: a
+ * loopback address so the dashboard and the local executor keep working, and
+ * the host's own tailnet address so roaming agents can reach it — without the
+ * LAN, the guest network, or a hotel's wifi being able to. The README's "no
+ * auth, LAN only" threat model stops being true the moment an agent claims
+ * work from outside the house, and this is the knob that makes it true again.
+ *
+ *   FLEET_BIND=127.0.0.1,100.x.y.z
+ */
+export const BIND = (process.env.FLEET_BIND ?? "0.0.0.0")
+  .split(",")
+  .map((h) => h.trim())
+  .filter(Boolean);
 export const DATA_DIR = process.env.FLEET_DATA_DIR ?? path.resolve("data");
 export const ARTIFACT_DIR = process.env.FLEET_ARTIFACT_DIR ?? path.resolve("artifacts/store");
 export const POWER_CONFIG_PATH = process.env.FLEET_POWER_CONFIG ?? path.resolve("power.json");

@@ -1757,5 +1757,137 @@ for (const [workload, device] of [["web-audit", "web:audit"], ["web-unfurl", "we
     absent.ok === false && absent.reason === "missing", JSON.stringify(absent));
 }
 
+// --- capability routing ---
+
+// An agent says what it can run; the queue never hands it anything else. The
+// hard part is not the filter, it is that a collector upgrade must not idle a
+// shelf of runners that predate the field — so "declared nothing" and "declared
+// an empty list" have to mean opposite things, and both are asserted here.
+{
+  const CAPS_POOL = `smoke-caps-${run}`;
+  const MODERN = `smoke-caps-modern-${run}`;
+  const LEGACY = `smoke-caps-legacy-${run}`;
+
+  await json("POST", "/devices/register", {
+    device_id: MODERN, descriptor: { model: "Modern", ram_mb: 8000, os: "android-15" },
+    pools: [CAPS_POOL], capabilities: ["benchmark", "batch:litert"],
+  });
+  // No capabilities key at all: the shape every runner sent before this landed.
+  await json("POST", "/devices/register", {
+    device_id: LEGACY, descriptor: { model: "Legacy", ram_mb: 4000, os: "android-11" },
+    pools: [CAPS_POOL],
+  });
+
+  const badCaps = await json("POST", "/devices/register", {
+    device_id: `${MODERN}-bad`, descriptor: {}, pools: [], capabilities: "benchmark",
+  });
+  check("capabilities must be an array", badCaps.status === 400, JSON.stringify(badCaps.body));
+
+  // A workload the collector ships with, pinned to the agent that declares it.
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-bench-${run}`, workload: "benchmark", executor: "device",
+    backend: "synthetic", targets: { device_id: MODERN },
+  });
+  const benchClaim = await json("GET", `/devices/${MODERN}/next-job`);
+  check("an agent claims a workload it declares",
+    benchClaim.status === 200 && benchClaim.body?.job_id === `smoke-caps-bench-${run}`,
+    JSON.stringify(benchClaim.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: `smoke-caps-bench-${run}`, device_id: MODERN, iter: 0, final: true, ok: true });
+
+  // pipeline is a shipped workload, so it enqueues; MODERN did not declare it,
+  // so MODERN is never offered it.
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-undeclared-${run}`, workload: "pipeline", executor: "device",
+    targets: { device_id: MODERN },
+  });
+  const refused = await json("GET", `/devices/${MODERN}/next-job`);
+  check("an agent is not offered a workload it did not declare", refused.status === 204, `status=${refused.status}`);
+
+  // The same job, offered to the agent that never mentioned capabilities.
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-legacy-${run}`, workload: "pipeline", executor: "device",
+    targets: { device_id: LEGACY },
+  });
+  const legacyClaim = await json("GET", `/devices/${LEGACY}/next-job`);
+  check("an agent that declared nothing is still offered everything",
+    legacyClaim.status === 200 && legacyClaim.body?.job_id === `smoke-caps-legacy-${run}`,
+    JSON.stringify(legacyClaim.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: `smoke-caps-legacy-${run}`, device_id: LEGACY, iter: 0, final: true, ok: true });
+
+  // A backend pairing satisfies the workload; the bare workload satisfies any
+  // backend. MODERN declares batch:litert but not batch.
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-litert-${run}`, workload: "batch", executor: "device",
+    backend: "litert", targets: { device_id: MODERN },
+  });
+  const litert = await json("GET", `/devices/${MODERN}/next-job`);
+  check("a workload:backend capability satisfies that backend",
+    litert.status === 200 && litert.body?.job_id === `smoke-caps-litert-${run}`, JSON.stringify(litert.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: `smoke-caps-litert-${run}`, device_id: MODERN, iter: 0, final: true, ok: true });
+
+  await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-coreml-${run}`, workload: "batch", executor: "device",
+    backend: "coreml", targets: { device_id: MODERN },
+  });
+  const coreml = await json("GET", `/devices/${MODERN}/next-job`);
+  check("a workload:backend capability does not satisfy a different backend",
+    coreml.status === 204, `status=${coreml.status}`);
+
+  // Re-registering without the key keeps what was declared; sending [] clears
+  // it. Without this an older build rolling back would widen itself to all.
+  await json("POST", "/devices/register", {
+    device_id: MODERN, descriptor: { model: "Modern", ram_mb: 8000, os: "android-15" }, pools: [CAPS_POOL],
+  });
+  const kept = await json("GET", "/api/devices");
+  const modernRow = (kept.body?.devices ?? []).find((d: any) => d.device_id === MODERN);
+  check("a re-register that omits capabilities keeps them",
+    Array.isArray(modernRow?.capabilities) && modernRow.capabilities.includes("benchmark"),
+    JSON.stringify(modernRow?.capabilities));
+  const legacyRow = (kept.body?.devices ?? []).find((d: any) => d.device_id === LEGACY);
+  check("an agent that never declared reads as null, not empty",
+    legacyRow?.capabilities === null, JSON.stringify(legacyRow?.capabilities));
+
+  // A workload the collector has never heard of. Refused while nothing can run
+  // it, accepted once an agent claims it — that is the whole point of the
+  // change: a new runner adds work without a collector release.
+  const orphan = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-orphan-${run}`, workload: "teleport", executor: "device",
+  });
+  check("an unknown workload no agent can run is refused at enqueue",
+    orphan.status === 422, `status=${orphan.status} ${JSON.stringify(orphan.body)}`);
+
+  const NOVEL = `smoke-caps-novel-${run}`;
+  await json("POST", "/devices/register", {
+    device_id: NOVEL, descriptor: { model: "Novel", ram_mb: 16000, os: "macos-15" },
+    pools: [CAPS_POOL], capabilities: ["teleport"],
+  });
+  const accepted = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-novel-${run}`, workload: "teleport", executor: "device",
+    targets: { device_id: NOVEL },
+  });
+  check("an unknown workload an agent declares is accepted",
+    accepted.status === 200 || accepted.status === 201, `status=${accepted.status} ${JSON.stringify(accepted.body)}`);
+  const novelClaim = await json("GET", `/devices/${NOVEL}/next-job`);
+  check("and the declaring agent claims it",
+    novelClaim.status === 200 && novelClaim.body?.job_id === `smoke-caps-novel-${run}`,
+    JSON.stringify(novelClaim.body));
+  await json("POST", "/results", { schema: 1, kind: "result", job_id: `smoke-caps-novel-${run}`, device_id: NOVEL, iter: 0, final: true, ok: true });
+
+  // capabilities is readable from a match expression, so a job can target the
+  // toolchain an agent has rather than the hardware it runs on.
+  check("match reads capabilities", evalMatch("capabilities ~ 'teleport'", { capabilities: ["teleport", "benchmark"] }));
+  check("match does not invent capabilities", !evalMatch("capabilities ~ 'teleport'", { capabilities: ["benchmark"] }));
+
+  // Fan-out and the composer's preview must agree with the claim, or the
+  // preview promises devices the queue then refuses.
+  const fanCaps = await json("POST", "/jobs", {
+    schema: 1, job_id: `smoke-caps-fan-${run}`, workload: "pipeline", executor: "device",
+    fanout: true, targets: { pool: CAPS_POOL },
+  });
+  const capKids = (fanCaps.body?.fanout ?? []) as string[];
+  check("fanout skips agents that cannot run the workload",
+    capKids.length === 1 && capKids[0].endsWith(LEGACY), JSON.stringify(fanCaps.body));
+}
+
 console.log(failures === 0 ? "\nsmoke: ALL PASS" : `\nsmoke: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

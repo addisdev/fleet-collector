@@ -22,7 +22,12 @@ type Announce = (event: { type: string; [k: string]: unknown }) => void;
 type MatchingDevices = (
   pool?: string,
   match?: string,
-) => { device_id: string; pools: string; pools_override: string | null; descriptor: string }[];
+  workload?: string,
+  backend?: string | null,
+) => {
+  device_id: string; pools: string; pools_override: string | null;
+  descriptor: string; capabilities: string | null;
+}[];
 
 export function registerApi(app: FastifyInstance, announce: Announce, matchingDevices: MatchingDevices) {
   registerOverview(app);

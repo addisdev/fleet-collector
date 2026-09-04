@@ -14,7 +14,12 @@ import { requireToken } from "./guard.js";
 import { iso, parse, sha256Refs } from "./shared.js";
 
 type Announce = (event: { type: string; [k: string]: unknown }) => void;
-type MatchingDevices = (pool?: string, match?: string) => { device_id: string; pools: string; pools_override: string | null; descriptor: string }[];
+type MatchingDevices = (
+  pool?: string, match?: string, workload?: string, backend?: string | null,
+) => {
+  device_id: string; pools: string; pools_override: string | null;
+  descriptor: string; capabilities: string | null;
+}[];
 
 /** Cancelling is a state change plus lock release. The runner is not told
  *  directly — it learns on its next beacon, which returns lease_renewed:false
@@ -121,11 +126,18 @@ export function registerMutations(app: FastifyInstance, announce: Announce, matc
    *  fan-out uses so the preview cannot promise a different set than it gets. */
   app.post("/api/jobs/preview-targets", async (req, reply) => {
     if (!requireToken(req, reply)) return;
-    const t = ((req.body ?? {}) as { targets?: { pool?: string; match?: string; device_id?: string } }).targets ?? {};
+    const body = (req.body ?? {}) as {
+      targets?: { pool?: string; match?: string; device_id?: string };
+      workload?: string; backend?: string;
+    };
+    const t = body.targets ?? {};
     if (t.match && !isValidMatch(t.match))
       return reply.code(400).send({ error: `invalid targets.match expression: ${t.match}` });
 
-    let devices = matchingDevices(t.pool, t.match);
+    // The composer knows the workload it is about to enqueue, so the preview
+    // counts the agents that can actually run it rather than every agent the
+    // pool and match happen to select.
+    let devices = matchingDevices(t.pool, t.match, body.workload, body.backend ?? null);
     if (t.device_id) devices = devices.filter((d) => d.device_id === t.device_id);
 
     return {

@@ -148,6 +148,10 @@ export function Compose() {
     const t = setTimeout(() => {
       mutate<{ count: number; devices: { device_id: string }[] }>("POST", "/api/jobs/preview-targets", {
         targets: { pool: pool || undefined, match: matchExpr || undefined, device_id: deviceId || undefined },
+        // Sent so the count means "agents that can run this", not "agents this
+        // pool selects" — otherwise the preview promises devices the queue
+        // would then refuse to hand the job to.
+        workload,
       })
         .then((r) => live && (setPreview(r), setPreviewError(null)))
         .catch((e) => live && (setPreview(null), setPreviewError((e as Error).message)));
@@ -156,7 +160,7 @@ export function Compose() {
       live = false;
       clearTimeout(t);
     };
-  }, [pool, matchExpr, deviceId, executor]);
+  }, [pool, matchExpr, deviceId, executor, workload]);
 
   const enqueue = useMutation(async () => {
     const out = await mutate<{ ok: boolean; job_id?: string; fanout?: string[] }>("POST", "/api/jobs", spec);

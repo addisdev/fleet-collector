@@ -108,6 +108,20 @@ against a stray browser tab, not an access control — `POST /jobs` stays open s
 the honest starting point is that every endpoint would need to be re-thought,
 not that a token would need to be added.
 
+That posture depends on every agent being on the same LAN, which stops being
+true the moment one of them is a laptop that leaves the house. `FLEET_BIND`
+is the knob for that case: a comma-separated list of addresses to answer on,
+defaulting to every interface. Set it to loopback plus the host's own tailnet
+address and the collector is reachable from your own devices anywhere and from
+nothing else — no port forward, no hotel wifi, no guest network.
+
+```bash
+FLEET_BIND=127.0.0.1,100.x.y.z npm start
+```
+
+The network is the access control either way. `FLEET_BIND` only decides which
+network that is.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party components and the licensing of the

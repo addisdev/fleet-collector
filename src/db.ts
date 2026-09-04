@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS devices (
   -- the device says what it thinks it is, the operator overrides, and neither
   -- erases the other. Effective pools = override ?? reported.
   pools_override TEXT,
+  -- What the agent says it can run; see the migration below for why NULL is
+  -- permissive rather than empty.
+  capabilities   TEXT,
   -- The device's name. Not a nickname beside its id: the id is what the runner
   -- reports and what job specs pin, and this is what a person calls the thing.
   name           TEXT,
@@ -256,6 +259,12 @@ for (const [column, ddl] of [
   ["pools_override", "pools_override TEXT"],
   ["name", "name TEXT"],
   ["notes", "notes TEXT"],
+  // What this agent says it can run. A pool is a label a person applied; a
+  // capability is a statement about the agent's own code and toolchain, which
+  // is why the queue routes on it and an operator cannot override it.
+  // NULL means an agent registered before capabilities existed: it is offered
+  // everything, exactly as it was before, rather than silently offered nothing.
+  ["capabilities", "capabilities TEXT"],
 ] as const) {
   if (!deviceColumns.has(column)) db.exec(`ALTER TABLE devices ADD COLUMN ${ddl}`);
 }
